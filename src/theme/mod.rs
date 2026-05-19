@@ -1,5 +1,7 @@
 use ratatui::style::Color;
 
+pub mod syntax;
+
 pub struct Theme {
     pub name: String,
     pub fg: Color,
@@ -119,8 +121,8 @@ impl Theme {
             command_bar_fg: Color::Rgb(200, 200, 200),
             border: Color::Rgb(80, 80, 80),
             border_active: Color::Rgb(150, 150, 200),
-            search_highlight: Color::Rgb(80, 80, 40),
-            match_highlight: Color::Rgb(120, 80, 0),
+            search_highlight: Color::Rgb(180, 140, 30),
+            match_highlight: Color::Rgb(90, 75, 15),
             current_line: Color::Rgb(40, 40, 40),
             comment: Color::Rgb(100, 140, 100),
             keyword: Color::Rgb(86, 156, 214),
@@ -175,8 +177,8 @@ impl Theme {
         t.command_bar_fg = Color::Rgb(51, 180, 51);
         t.border = Color::Rgb(0, 60, 0);
         t.border_active = Color::Rgb(0, 120, 0);
-        t.search_highlight = Color::Rgb(0, 80, 0);
-        t.match_highlight = Color::Rgb(0, 100, 0);
+        t.search_highlight = Color::Rgb(180, 140, 30);
+        t.match_highlight = Color::Rgb(70, 55, 10);
         t.current_line = Color::Rgb(0, 35, 0);
         t.comment = Color::Rgb(0, 100, 0);
         t.keyword = Color::Rgb(51, 255, 51);

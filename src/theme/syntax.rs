@@ -1,10 +1,11 @@
 use regex::Regex;
 use crate::theme::Theme;
-use ratatui::style::{Style, Color};
+use ratatui::style::{Style, Modifier};
 use std::sync::LazyLock;
 
 pub struct SyntaxHighlighter;
 
+#[allow(dead_code)]
 struct LanguagePatterns {
     keywords: &'static [&'static str],
     types: &'static [&'static str],
@@ -175,11 +176,13 @@ impl SyntaxHighlighter {
                 functions: r"\b([a-zA-Z_]\w*)\s*\(",
             },
             "md" | "markdown" => LanguagePatterns {
-                keywords: &[],
+                keywords: &[
+                    "#", "##", "###", "####", "#####", "######",
+                ],
                 types: &[],
                 constants: &[],
                 comments: &[],
-                strings: &[],
+                strings: &["`", "```"],
                 numbers: r"",
                 functions: r"",
             },
@@ -209,6 +212,10 @@ impl SyntaxHighlighter {
             return vec![(String::new(), Style::default().fg(theme.fg))];
         }
 
+        if ext == "md" || ext == "markdown" {
+            return Self::highlight_markdown_line(line, theme);
+        }
+
         let patterns = Self::get_patterns(ext);
         let default_style = Style::default().fg(theme.fg);
         let mut all_ranges: Vec<(usize, usize, Style)> = Vec::new();
@@ -220,11 +227,10 @@ impl SyntaxHighlighter {
                 if prefix == &"/*" || prefix == &"*/" || prefix == &"--[[" || prefix == &"]]" {
                     continue;
                 }
-                let mut search_start = 0;
+                let search_start = 0;
                 while let Some(pos) = line[search_start..].find(prefix) {
                     let abs_pos = search_start + pos;
                     comment_ranges.push((abs_pos, line.len(), comment_style));
-                    search_start = line.len();
                     break;
                 }
             }
@@ -289,6 +295,149 @@ impl SyntaxHighlighter {
         }
 
         segments
+    }
+
+    fn highlight_markdown_line(line: &str, theme: &Theme) -> Vec<(String, Style)> {
+        let trimmed = line.trim_start();
+        let h1 = Style::default().fg(theme.heading1).add_modifier(Modifier::BOLD);
+        let h2 = Style::default().fg(theme.heading2).add_modifier(Modifier::BOLD);
+        let h3 = Style::default().fg(theme.heading3).add_modifier(Modifier::BOLD);
+        let code = Style::default().fg(theme.code_block);
+        let link = Style::default().fg(theme.link);
+        let quote = Style::default().fg(theme.blockquote).add_modifier(Modifier::ITALIC);
+        let list = Style::default().fg(theme.list);
+        let hr = Style::default().fg(theme.comment);
+        let bold = Style::default().fg(theme.fg).add_modifier(Modifier::BOLD);
+        let default = Style::default().fg(theme.fg);
+
+        if trimmed.starts_with("######") {
+            return vec![(line.to_string(), h3)];
+        }
+        if trimmed.starts_with("#####") {
+            return vec![(line.to_string(), h3)];
+        }
+        if trimmed.starts_with("####") {
+            return vec![(line.to_string(), h2)];
+        }
+        if trimmed.starts_with("###") {
+            return vec![(line.to_string(), h2)];
+        }
+        if trimmed.starts_with("##") {
+            return vec![(line.to_string(), h1)];
+        }
+        if trimmed.starts_with("# ") {
+            return vec![(line.to_string(), h1)];
+        }
+
+        if trimmed.starts_with("> ") || trimmed.starts_with('>') {
+            return vec![(line.to_string(), quote)];
+        }
+
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            return vec![(line.to_string(), list)];
+        }
+        if trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && trimmed.contains(". ") {
+            return vec![(line.to_string(), list)];
+        }
+
+        if line.starts_with("```") || line.starts_with("~~~") {
+            return vec![(line.to_string(), code)];
+        }
+
+        let hr_chars: Vec<char> = trimmed.chars().filter(|c| *c == '-' || *c == '*' || *c == '_').collect();
+        if hr_chars.len() >= 3 && hr_chars.len() == trimmed.len() {
+            return vec![(line.to_string(), hr)];
+        }
+
+        if line.contains('`') {
+            let mut segments: Vec<(String, Style)> = Vec::new();
+            let mut in_code = false;
+            let mut current = String::new();
+            for c in line.chars() {
+                if c == '`' {
+                    if !current.is_empty() {
+                        segments.push((current.clone(), if in_code { code } else { default }));
+                        current.clear();
+                    }
+                    in_code = !in_code;
+                    current.push(c);
+                } else {
+                    current.push(c);
+                }
+            }
+            if !current.is_empty() {
+                segments.push((current.clone(), if in_code { code } else { default }));
+            }
+            return segments;
+        }
+
+        if line.contains("**") || line.contains("__") {
+            let mut segments: Vec<(String, Style)> = Vec::new();
+            let mut current = String::new();
+            let mut is_bold = false;
+            let mut i = 0;
+            let chars: Vec<char> = line.chars().collect();
+            while i < chars.len() {
+                if i + 1 < chars.len() && (chars[i] == '*' && chars[i+1] == '*') {
+                    if !current.is_empty() {
+                        segments.push((current.clone(), if is_bold { bold } else { default }));
+                        current.clear();
+                    }
+                    is_bold = !is_bold;
+                    i += 2;
+                } else if i + 1 < chars.len() && (chars[i] == '_' && chars[i+1] == '_') {
+                    if !current.is_empty() {
+                        segments.push((current.clone(), if is_bold { bold } else { default }));
+                        current.clear();
+                    }
+                    is_bold = !is_bold;
+                    i += 2;
+                } else {
+                    current.push(chars[i]);
+                    i += 1;
+                }
+            }
+            if !current.is_empty() {
+                segments.push((current.clone(), if is_bold { bold } else { default }));
+            }
+            return segments;
+        }
+
+        if line.contains('[') && line.contains("](") {
+            let mut segments: Vec<(String, Style)> = Vec::new();
+            let mut current = String::new();
+            let mut in_link_text = false;
+            let mut in_url = false;
+            for c in line.chars() {
+                if c == '[' && !in_link_text && !in_url {
+                    if !current.is_empty() {
+                        segments.push((current.clone(), default));
+                        current.clear();
+                    }
+                    in_link_text = true;
+                    current.push(c);
+                } else if c == ']' && in_link_text {
+                    current.push(c);
+                    in_link_text = false;
+                } else if c == '(' && !in_link_text && !in_url && current.ends_with(']') {
+                    in_url = true;
+                    current.push(c);
+                } else if c == ')' && in_url {
+                    current.push(c);
+                    segments.push((current.clone(), link));
+                    current.clear();
+                    in_url = false;
+                } else {
+                    current.push(c);
+                }
+            }
+            if !current.is_empty() {
+                segments.push((current.clone(), default));
+            }
+            return segments;
+        }
+
+        vec![(line.to_string(), default)]
     }
 
     pub fn highlight_text(text: &str, ext: &str, theme: &Theme) -> Vec<Vec<(String, Style)>> {

@@ -3,14 +3,16 @@ use ratatui::{
     Frame,
     widgets::Paragraph,
     text::{Line as TextLine, Span},
-    style::Style,
+    style::{Style, Color},
 };
 
-use crate::core::Position;
+use crate::core::{Position, SearchState};
 use crate::core::buffer::Buffer;
 use crate::editor::cursor::Cursor;
 use crate::editor::selection::Selection;
 use crate::theme::Theme;
+use crate::theme::syntax::SyntaxHighlighter;
+use ratatui::style::Modifier;
 
 #[derive(Debug, Clone)]
 pub struct RenderEngine {
@@ -59,6 +61,8 @@ impl RenderEngine {
         theme: &Theme,
         line_numbers: bool,
         relative_numbers: bool,
+        syntax_ext: Option<&str>,
+        search_state: &SearchState,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -106,6 +110,17 @@ impl RenderEngine {
 
         let col_offset = self.scroll_offset.column;
         let mut text_lines: Vec<TextLine<'static>> = Vec::with_capacity(visible_range.len());
+
+        let query_len = search_state.query.len();
+        let mut matches_by_line: Vec<Vec<(usize, usize)>> = vec![Vec::new(); total_lines];
+        if !search_state.query.is_empty() {
+            for m in &search_state.matches {
+                let end = m.column + query_len;
+                if m.line < total_lines {
+                    matches_by_line[m.line].push((m.column, end));
+                }
+            }
+        }
 
         for line_idx in visible_range.clone() {
             let line_text = if line_idx < total_lines {
@@ -163,22 +178,131 @@ impl RenderEngine {
                 }
             }
 
-            let display_text = if col_offset < line_text.len() {
-                line_text[col_offset..].to_string()
-            } else {
-                String::new()
-            };
-
             let mut line_style = Style::default().fg(theme.fg);
             if let Some(bg) = line_bg {
                 line_style = line_style.bg(bg);
             }
 
-            if display_text.is_empty() {
-                text_lines.push(TextLine::from(vec![Span::styled(" ", line_style)]));
+            let matches_on_line = if query_len > 0 && line_idx < matches_by_line.len() {
+                matches_by_line[line_idx].clone()
             } else {
-                spans.push(Span::styled(display_text, line_style));
-                text_lines.push(TextLine::from(spans).style(line_style));
+                Vec::new()
+            };
+
+            let current_match_on_line = if let Some(cmi) = search_state.current_match {
+                if cmi < search_state.matches.len() {
+                    let mp = &search_state.matches[cmi];
+                    if mp.line == line_idx {
+                        matches_on_line.iter().position(|&(s, _)| s == mp.column)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let match_fg = Color::Rgb(240, 240, 220);
+            let match_hl = Style::default().bg(theme.match_highlight).fg(match_fg);
+            let current_hl = Style::default().bg(theme.search_highlight).fg(match_fg).add_modifier(Modifier::BOLD);
+
+            if let Some(ext) = syntax_ext {
+                let segments: Vec<(String, Style)> = SyntaxHighlighter::highlight_line(&line_text, ext, theme);
+                let mut adjusted: Vec<(String, Style)> = Vec::new();
+                let mut acc: usize = 0;
+                for (seg_text, seg_style) in &segments {
+                    let seg_len = seg_text.chars().count();
+                    if acc + seg_len <= col_offset {
+                        acc += seg_len;
+                        continue;
+                    }
+                    let skip_in_seg = col_offset.saturating_sub(acc);
+                    let visible = if skip_in_seg > 0 && skip_in_seg < seg_len {
+                        let start = seg_text.char_indices().nth(skip_in_seg).map(|(i,_)| i).unwrap_or(seg_text.len());
+                        seg_text[start..].to_string()
+                    } else if skip_in_seg == 0 {
+                        seg_text.clone()
+                    } else {
+                        String::new()
+                    };
+                    if !visible.is_empty() {
+                        let merged_fg = seg_style.fg.unwrap_or(theme.fg);
+                        let merged_bg = line_style.bg.unwrap_or(theme.bg);
+                        let merged = Style::default().fg(merged_fg).bg(merged_bg);
+                        if seg_style.add_modifier != Modifier::empty() {
+                            adjusted.push((visible, merged.add_modifier(seg_style.add_modifier)));
+                        } else {
+                            adjusted.push((visible, merged));
+                        }
+                    }
+                    acc += seg_len;
+                }
+                if adjusted.is_empty() {
+                    text_lines.push(TextLine::from(vec![Span::styled(" ", line_style)]));
+                } else if matches_on_line.is_empty() {
+                    let spans: Vec<Span> = adjusted.into_iter().map(|(t, s)| {
+                        Span::styled(t, s)
+                    }).collect();
+                    text_lines.push(TextLine::from(spans).style(line_style));
+                } else {
+                    let mut char_spans: Vec<(String, Style)> = Vec::new();
+                    let mut abs_col = col_offset;
+                    for (seg_text, seg_style) in &adjusted {
+                        let seg_fg = seg_style.fg.unwrap_or(theme.fg);
+                        let seg_bg = seg_style.bg.unwrap_or(theme.bg);
+                        for ch in seg_text.chars() {
+                            let is_match = matches_on_line.iter().any(|&(s, e)| abs_col >= s && abs_col < e);
+                            let is_current = if let Some(ci) = current_match_on_line {
+                                ci < matches_on_line.len() && is_match && abs_col >= matches_on_line[ci].0 && abs_col < matches_on_line[ci].1
+                            } else {
+                                false
+                            };
+                            let chr_bg = if is_current {
+                                theme.search_highlight
+                            } else if is_match {
+                                theme.match_highlight
+                            } else {
+                                seg_bg
+                            };
+                            let chr_fg = if is_match { match_fg } else { seg_fg };
+                            let chr_style = if is_current {
+                                Style::default().fg(chr_fg).bg(chr_bg).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(chr_fg).bg(chr_bg)
+                            };
+                            if let Some(last) = char_spans.last_mut() {
+                                if last.1 == chr_style {
+                                    last.0.push(ch);
+                                    abs_col += 1;
+                                    continue;
+                                }
+                            }
+                            char_spans.push((ch.to_string(), chr_style));
+                            abs_col += 1;
+                        }
+                    }
+                    if char_spans.is_empty() {
+                        text_lines.push(TextLine::from(vec![Span::styled(" ", line_style)]));
+                    } else {
+                        let spans: Vec<Span> = char_spans.into_iter().map(|(t, s)| {
+                            Span::styled(t, s)
+                        }).collect();
+                        text_lines.push(TextLine::from(spans).style(line_style));
+                    }
+                }
+            } else {
+                let search_spans = Self::build_search_highlighted_spans(
+                    &line_text,
+                    col_offset,
+                    &matches_on_line,
+                    current_match_on_line,
+                    line_style,
+                    match_hl,
+                    current_hl,
+                );
+                text_lines.push(TextLine::from(search_spans).style(line_style));
             }
         }
 
@@ -322,6 +446,69 @@ impl RenderEngine {
         let start = self.scroll_offset.line.min(total);
         let end = (start + self.viewport_height).min(total);
         start..end
+    }
+
+    fn build_search_highlighted_spans(
+        line_text: &str,
+        col_offset: usize,
+        matches_on_line: &[(usize, usize)],
+        current_match_on_line: Option<usize>,
+        default_style: Style,
+        match_style: Style,
+        current_match_style: Style,
+    ) -> Vec<Span<'static>> {
+        if matches_on_line.is_empty() {
+            let text = if col_offset < line_text.len() {
+                line_text[col_offset..].to_string()
+            } else {
+                String::new()
+            };
+            return vec![Span::styled(text, default_style)];
+        }
+
+        let mut segments: Vec<(usize, usize)> = Vec::new();
+        let mut prev_end = 0usize;
+        for &(ms, me) in matches_on_line {
+            if ms > prev_end {
+                segments.push((prev_end, ms));
+            }
+            segments.push((ms, me));
+            prev_end = me;
+        }
+        if prev_end < line_text.len() {
+            segments.push((prev_end, line_text.len()));
+        }
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (seg_start, seg_end) in segments {
+            if seg_end <= col_offset {
+                continue;
+            }
+            let text_start = if seg_start < col_offset { col_offset } else { seg_start };
+            if text_start >= seg_end {
+                continue;
+            }
+            let text = &line_text[text_start..seg_end];
+            let is_match = matches_on_line.iter().any(|&(ms, me)| ms == seg_start && me == seg_end);
+            let is_current = if let Some(ci) = current_match_on_line {
+                is_match && seg_start == matches_on_line[ci].0 && seg_end == matches_on_line[ci].1
+            } else {
+                false
+            };
+            let style = if is_current {
+                current_match_style
+            } else if is_match {
+                match_style
+            } else {
+                default_style
+            };
+            spans.push(Span::styled(text.to_string(), style));
+        }
+
+        if spans.is_empty() {
+            spans.push(Span::styled(" ", default_style));
+        }
+        spans
     }
 
     pub fn set_viewport(&mut self, height: usize, width: usize) {

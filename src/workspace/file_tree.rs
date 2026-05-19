@@ -2,6 +2,13 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use crate::workspace::FileEntry;
 
+pub struct TreeDisplayEntry {
+    pub entry: FileEntry,
+    pub connector: String,
+    pub icon: String,
+    pub display_name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileTree {
     pub root: PathBuf,
@@ -266,6 +273,77 @@ impl FileTree {
 
     pub fn is_expandable(entry: &FileEntry) -> bool {
         entry.is_dir
+    }
+
+    pub fn display_entries(&self) -> Vec<TreeDisplayEntry> {
+        self.build_display(&self.entries, Vec::new())
+    }
+
+    fn build_display(&self, entries: &[FileEntry], ancestry: Vec<bool>) -> Vec<TreeDisplayEntry> {
+        let mut result = Vec::new();
+        let count = entries.len();
+        for (i, entry) in entries.iter().enumerate() {
+            let is_last = i == count - 1;
+            let mut connector = String::new();
+            for &has_more in &ancestry {
+                if has_more {
+                    connector.push_str("\u{2502}  ");
+                } else {
+                    connector.push_str("   ");
+                }
+            }
+            if is_last {
+                connector.push_str("\u{2514}\u{2500}\u{2500}");
+            } else {
+                connector.push_str("\u{251C}\u{2500}\u{2500}");
+            }
+
+            let icon = if entry.is_dir {
+                if entry.expanded { "\u{25BE} " } else { "\u{25B8} " }
+            } else {
+                Self::file_icon(&entry.name)
+            };
+
+            let display_name = if entry.is_symlink {
+                format!("{}@", entry.name)
+            } else {
+                entry.name.clone()
+            };
+
+            result.push(TreeDisplayEntry {
+                entry: entry.clone(),
+                connector,
+                icon: icon.to_string(),
+                display_name,
+            });
+
+            if entry.expanded && !entry.children.is_empty() {
+                let mut child_ancestry = ancestry.clone();
+                child_ancestry.push(!is_last);
+                result.extend(self.build_display(&entry.children, child_ancestry));
+            }
+        }
+        result
+    }
+
+    pub fn file_icon(name: &str) -> &'static str {
+        let ext = name.rsplit('.').next().unwrap_or("");
+        match ext {
+            "rs" => "\u{2699} ",
+            "py" => "\u{25C9} ",
+            "js" | "jsx" => "\u{2731} ",
+            "ts" | "tsx" => "\u{2731} ",
+            "md" | "markdown" => "\u{2714} ",
+            "json" => "\u{2774} ",
+            "toml" => "\u{2699} ",
+            "yaml" | "yml" => "\u{2630} ",
+            "css" | "scss" | "less" => "\u{2726} ",
+            "html" => "\u{2731} ",
+            "sh" | "bash" | "zsh" => "\u{269B} ",
+            "txt" => "\u{270E} ",
+            "gitignore" | "dockerignore" => "\u{2691} ",
+            _ => "  ",
+        }
     }
 
     pub fn icon_for(entry: &FileEntry) -> &'static str {

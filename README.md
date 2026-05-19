@@ -1,7 +1,7 @@
 <div align="center">
   <img src="images/tflow_logo.png" alt="tFlow Logo" width="200"/>
-  <h1>tFlow (Beta) </h1>
-  <p><strong>Terminal-native text & markdown editor</strong></p>
+  <h1>tFlow (Beta)</h1>
+  <p><strong>Terminal-native text editor with vim-inspired modal editing</strong></p>
   <p>
     <img src="images/showcase.png" alt="tFlow Showcase" width="90%"/>
   </p>
@@ -11,17 +11,22 @@
 
 ## Features
 
-- **Dual preview** — Plain text view for `.txt` files, styled markdown preview for `.md` files
+- **Vim-inspired modal editing** — Normal, Insert, Visual, Visual Line, Command, Search modes
+- **Search with highlighting** — `/` to search, all matches highlighted in gold, current match brighter + bold, match count in statusline (`[2/5]`)
+- **Match cycling** — `n` / `N` cycle forward/backward through matches with wrapping
+- **Auto-clear** — Press `Esc` or start typing to dismiss search highlights
 - **Rope-based engine** — Handles 100k+ line files with low latency
-- **Vim-inspired modes** — Normal, Insert, Visual, Command, Search
+- **Syntax highlighting** — Language-aware coloring for JavaScript, Python, Rust, JSON, Markdown, and more
 - **Markdown rendering** — Headings, tables, lists, code blocks, blockquotes, checkboxes
-- **Workspace tools** — File tree browser, workspace grep search
+- **File tree browser** — `F1` / `Ctrl+T` to toggle, navigate with arrows/`hjkl`, `Enter` to open
+- **Workspace grep** — Full-text search across workspace files
 - **Full undo/redo** — With change-grouping for natural history
 - **Clipboard** — System clipboard integration (copy, cut, paste)
-- **Multi-buffer** — Tab through open files, split panes
-- **Command palette** — Fuzzy-find any command
-- **Configurable** — TOML config at `~/.config/tflow/config.toml`
-- **Themes** — retro_green, amber, synthwave, tokyo_night, default_dark
+- **Multi-buffer** — Switch between open files
+- **Command palette** — `Ctrl+P` fuzzy-find any command
+- **User config** — TOML config at `~/.config/tflow/config.toml`
+- **5 themes** — retro_green (default), amber, synthwave, tokyo_night, default_dark
+- **Autosave + recovery** — Background auto-save and crash recovery files
 
 ---
 
@@ -34,6 +39,8 @@ git clone https://github.com/Simangka/tFlow.git
 cd tFlow
 cargo build --release
 cp target/release/tflow ~/.local/bin/
+# Or on Windows:
+copy target\release\tflow.exe %USERPROFILE%\.cargo\bin\tflow.exe
 ```
 
 Or run directly:
@@ -68,10 +75,11 @@ tFlow uses a vim-inspired modal system:
 | Mode | Enter | Purpose |
 |------|-------|---------|
 | **Normal** | `Esc` | Navigate and manipulate text |
-| **Insert** | `i` | Type and edit text |
+| **Insert** | `i` / `a` | Type and edit text |
 | **Visual** | `v` | Select text |
+| **Visual Line** | `V` | Select whole lines |
 | **Command** | `:` | Run commands |
-| **Search** | `/` | Find text |
+| **Search** | `/` | Find and highlight text |
 
 ---
 
@@ -83,23 +91,63 @@ tFlow uses a vim-inspired modal system:
 |-----|--------|
 | `h` `j` `k` `l` | Move cursor |
 | `w` `b` | Word forward / backward |
-| `0` `$` | Start / end of line |
-| `gg` `G` | Start / end of file |
+| `0` `^` | Start of line |
+| `$` | End of line |
+| `gg` | Start of file |
+| `G` | End of file |
 | `%` | Matching brace |
 | `Ctrl+u` `Ctrl+d` | Half page up / down |
 | `Ctrl+b` `Ctrl+f` | Page up / down |
 | `i` `a` | Insert mode (before / after cursor) |
+| `I` `A` | Insert at line start / end |
 | `o` `O` | Insert new line (below / above) |
-| `v` `V` | Visual / Visual line mode |
-| `x` | Delete character |
+| `v` | Visual mode |
+| `V` | Visual line mode |
+| `x` `X` | Delete character forward / backward |
 | `dd` | Delete line |
 | `yy` | Copy (yank) line |
-| `p` `P` | Paste |
+| `p` `P` | Paste after / before cursor |
 | `u` | Undo |
 | `Ctrl+r` | Redo |
 | `>` `<` | Indent / Unindent |
 | `D` | Delete to end of line |
 | `J` | Join lines |
+| `n` | Next search match |
+| `N` | Previous search match |
+
+#### Insert mode
+
+| Key | Action |
+|-----|--------|
+| `Esc` | Return to Normal mode |
+| `Ctrl+c` | Return to Normal mode |
+| `Backspace` | Delete character backward |
+| `Delete` | Delete character forward |
+| `Enter` | Insert newline |
+| `Tab` | Insert tab |
+
+#### Visual mode
+
+| Key | Action |
+|-----|--------|
+| `h` `j` `k` `l` | Extend selection |
+| `Esc` | Clear selection |
+| `x` `d` | Cut selection |
+| `y` | Copy selection |
+
+#### Search mode
+
+| Key | Action |
+|-----|--------|
+| `/` | Enter search mode (forward) |
+| Type query | Characters appended to search buffer |
+| `Enter` | Execute search, jump to first match |
+| `Esc` | Cancel search, clear highlights |
+| `Backspace` | Remove last character |
+| `n` | Next match (after search) |
+| `N` | Previous match (after search) |
+
+Search highlighting is automatically cleared when you start editing or press `Esc` in Normal mode.
 
 #### Command mode
 
@@ -111,7 +159,17 @@ tFlow uses a vim-inspired modal system:
 | `:q!` | Force quit |
 | `:e <file>` | Open file |
 | `:new` | New buffer |
-| `:help` | Show help |
+| `:help` | Show help screen |
+
+#### File tree (`F1` / `Ctrl+T`)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Navigate up |
+| `↓` / `j` | Navigate down |
+| `Enter` / `→` / `l` | Expand directory / open file |
+| `←` / `h` | Collapse directory |
+| `Esc` / `Tab` | Return focus to editor |
 
 #### Global
 
@@ -120,21 +178,19 @@ tFlow uses a vim-inspired modal system:
 | `Ctrl+s` | Save |
 | `Ctrl+q` | Quit |
 | `Ctrl+p` | Command palette |
-| `Ctrl+k` / `F11` | Toggle markdown preview |
-| `Alt+m` | Toggle plain / markdown preview mode |
-| `F1` | Toggle file tree |
-| `Tab` / `Shift+Tab` | Next / previous buffer |
+| `Ctrl+t` / `F1` | Toggle file tree |
+| `Ctrl+k` / `F11` | Toggle help preview |
 
-#### Search mode
+---
 
-| Key | Action |
-|-----|--------|
-| `/` | Search forward |
-| `?` | Search backward |
-| `n` | Next match |
-| `N` | Previous match |
-| `Enter` | Execute search |
-| `Esc` | Cancel search |
+### Search in detail
+
+1. Press `/` to enter search mode
+2. Type your query (matches are found as you type)
+3. Press `Enter` to confirm — all matches get a gold highlight, current match is brighter
+4. Statusline shows `[current/total]` (e.g. `[2/5]`)
+5. Press `n` to cycle forward, `N` to cycle backward (wraps around)
+6. Press `Esc` to dismiss highlights, or just start typing — edits auto-clear highlights
 
 ---
 
@@ -154,6 +210,7 @@ tab_width = 4
 autosave = true
 cursor_blink_period_ms = 500
 scrolloff = 3
+word_wrap = false
 history_size = 1000
 
 [markdown]
@@ -167,11 +224,13 @@ show_commandbar = true
 
 #### Themes
 
-- `retro_green` — Phosphor green CRT aesthetic
-- `amber` — Warm amber terminal
-- `synthwave` — Purple/cyan synthwave
-- `tokyo_night` — Blue-based Tokyo Night
-- `default_dark` — Modern dark theme
+| Theme | Description |
+|-------|-------------|
+| `retro_green` | Phosphor green CRT aesthetic (default) |
+| `amber` | Warm amber terminal glow |
+| `synthwave` | Purple/cyan synthwave retro |
+| `tokyo_night` | Blue-based Tokyo Night |
+| `default_dark` | Modern dark theme |
 
 ---
 
@@ -179,24 +238,44 @@ show_commandbar = true
 
 ```
 src/
-  app/           Application state, event loop
-  core/          Text buffer (ropey), position, range types
-  ui/            Layout, statusline, panels, widgets
-  input/         Crossterm event stream
+  app/           Application state, event loop, action dispatch
+  core/          Text buffer (ropey), Position, Range, types
+  ui/            Layout calculation, statusline, panels
+  input/         Crossterm event stream with tick events
   commands/      Action enum, keymap, command registry, palette
   editor/        Cursor, selection, modes, history, edit operations
-  markdown/      Parser and renderer (plain text + markdown)
-  rendering/     Dirty-region render engine, line numbers, scrollbar
-  theme/         Color schemes, syntax highlighting
-  config/        TOML config loading
-  workspace/     File tree, grep search
+  markdown/      Help screen and preview rendering
+  rendering/     Render engine, line numbers, scrollbar, search highlighting
+  theme/         Color schemes (5 themes), syntax highlighter
+  config/        TOML config loading and CLI merge
+  workspace/     File tree browser, workspace grep searcher
   async_tasks/   Background task queue (autosave, file watching)
-  plugins/       Plugin system architecture (future WASM support)
+  plugins/       Plugin system architecture (future WASM)
 ```
+
+---
+
+## Roadmap / TODO
+
+Upcoming features planned:
+
+| Feature | Status |
+|---------|--------|
+| Word completion (buffer-scan) | 🔜 Planned |
+| Fuzzy file finder (Ctrl+P) | 🔜 Planned |
+| Split panes (vertical/horizontal) | 🔜 Planned |
+| Session save/restore | 🔜 Planned |
+| Multi-cursor (Ctrl+D) | 🔜 Planned |
+| Macro recording/playback | 🔜 Planned |
+| Bookmarks (m' / ') | 🔜 Planned |
+| Integrated PTY terminal | 🔜 Planned |
+| LSP integration (completions, diagnostics, go-to-def) | 🔜 Planned |
+| Git integration (inline blame, hunk staging) | 🔜 Planned |
+| Live markdown preview | 🔜 Planned |
+| Diagnostics gutter | 🔜 Planned |
 
 ---
 
 ## Built with Rust
 
-
----
+Uses [ratatui](https://github.com/ratatui-org/ratatui), [crossterm](https://github.com/crossterm-rs/crossterm), [ropey](https://github.com/cessen/ropey), [tree-sitter](https://tree-sitter.github.io/), [tokio](https://tokio.rs/), and more.

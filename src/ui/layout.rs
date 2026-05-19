@@ -14,12 +14,19 @@ pub struct UILayout {
     pub filetree_width: u16,
     pub preview_width_ratio: f64,
     pub preview_as_markdown: bool,
+    pub focused_pane: FocusedPane,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitDirection {
     Horizontal,
     Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusedPane {
+    Editor,
+    FileTree,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +57,7 @@ impl UILayout {
             filetree_width: 28,
             preview_width_ratio: 0.45,
             preview_as_markdown: false,
+            focused_pane: FocusedPane::Editor,
         }
     }
 

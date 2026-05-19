@@ -141,9 +141,6 @@ impl AppContext {
             self.cursor.preferred_column = self.buffers[id].cursor.column;
             self.editor_mode.mode = self.buffers[id].mode;
             self.selection.clear();
-            if let Some(ref p) = self.buffers[id].path {
-                self.layout.preview_as_markdown = p.extension().map(|e| e == "md" || e == "markdown").unwrap_or(false);
-            }
             true
         } else {
             false
@@ -165,8 +162,6 @@ impl AppContext {
             }
         }
 
-        let is_md = path.extension().map(|e| e == "md" || e == "markdown").unwrap_or(false);
-        self.layout.preview_as_markdown = is_md;
         let id = self.buffers.len();
         let buffer = Buffer::from_path(id, path)?;
         self.buffers.push(buffer);
@@ -214,6 +209,20 @@ impl AppContext {
             cursor: self.cursor.position,
             mode: buf.mode,
         }
+    }
+
+    fn is_modification_action(&self, action: &Action) -> bool {
+        matches!(action,
+            Action::InsertChar(_) | Action::InsertNewline | Action::InsertTab
+            | Action::DeleteBackward | Action::DeleteForward | Action::DeleteCharForward
+            | Action::DeleteCharBackward | Action::DeleteWordForward | Action::DeleteWordBackward
+            | Action::DeleteLine | Action::DeleteToEndOfLine
+            | Action::Paste | Action::Cut | Action::CutLine
+            | Action::Indent | Action::Unindent | Action::IndentLine | Action::UnindentLine
+            | Action::DuplicateLine | Action::MoveLineUp | Action::MoveLineDown
+            | Action::JoinLines | Action::ToggleComment
+            | Action::Undo | Action::Redo
+        )
     }
 
     pub fn update_cursor(&mut self) {
@@ -400,6 +409,7 @@ impl AppContext {
                 }
                 self.selection.clear();
                 self.palette.visible = false;
+                self.search_state = SearchState::default();
             }
             Action::SwitchToVisualMode => {
                 self.selection.start(self.cursor.position);
@@ -720,29 +730,30 @@ impl AppContext {
             }
             Action::ToggleFileTree => {
                 self.layout.show_file_tree = !self.layout.show_file_tree;
-                if self.layout.show_file_tree && self.file_tree.is_none() {
-                    if let Some(ref ws) = self.config.workspace.root_path {
-                        let mut ft = FileTree::new(ws.clone());
-                        let _ = ft.refresh();
-                        self.file_tree = Some(ft);
-                    } else {
-                        let cwd = std::env::current_dir().unwrap_or_default();
-                        let mut ft = FileTree::new(cwd);
-                        let _ = ft.refresh();
-                        self.file_tree = Some(ft);
+                if self.layout.show_file_tree {
+                    if self.file_tree.is_none() {
+                        if let Some(ref ws) = self.config.workspace.root_path {
+                            let mut ft = FileTree::new(ws.clone());
+                            let _ = ft.refresh();
+                            self.file_tree = Some(ft);
+                        } else {
+                            let cwd = std::env::current_dir().unwrap_or_default();
+                            let mut ft = FileTree::new(cwd);
+                            let _ = ft.refresh();
+                            self.file_tree = Some(ft);
+                        }
                     }
+                    let root = self.file_tree.as_ref().map(|ft| ft.root.display().to_string()).unwrap_or_default();
+                    self.push_info(format!("File tree - arrows navigate, Enter open, Esc back [{}]", root));
+                    self.layout.focused_pane = crate::ui::layout::FocusedPane::FileTree;
+                } else {
+                    self.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
                 }
             }
             Action::ToggleMarkdownPreview => {
                 self.layout.show_markdown_preview = !self.layout.show_markdown_preview;
-                if self.layout.show_markdown_preview {
-                    if let Some(ref p) = self.active_buffer().path {
-                        self.layout.preview_as_markdown = p.extension().map(|e| e == "md" || e == "markdown").unwrap_or(false);
-                    }
-                }
             }
             Action::FocusPreview => {
-                self.layout.preview_as_markdown = !self.layout.preview_as_markdown;
             }
             Action::ToggleLineNumbers => {
                 self.config.line_numbers.show = !self.config.line_numbers.show;
@@ -758,6 +769,15 @@ impl AppContext {
             }
             Action::DecreaseScrolloff => {
                 self.config.editor.scrolloff = self.config.editor.scrolloff.saturating_sub(1);
+            }
+            Action::FocusFileTree => {
+                self.layout.focused_pane = crate::ui::layout::FocusedPane::FileTree;
+                if !self.layout.show_file_tree {
+                    let _ = self.handle_action(&Action::ToggleFileTree);
+                }
+            }
+            Action::FocusEditor => {
+                self.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
             }
             Action::FocusPaneLeft => {}
             Action::FocusPaneRight => {}
@@ -894,6 +914,10 @@ impl AppContext {
             self.last_action = Some(action.clone());
         }
 
+        if !self.search_state.query.is_empty() && self.is_modification_action(action) {
+            self.search_state = SearchState::default();
+        }
+
         self.update_cursor();
         Ok(())
     }
@@ -940,28 +964,38 @@ impl AppContext {
 
         if !self.search_state.matches.is_empty() {
             let current = self.cursor.position;
+            let total = self.search_state.matches.len();
+            let start = self.search_state.current_match;
             let mut best = None;
             match self.search_state.direction {
                 SearchDirection::Forward => {
-                    for (i, m) in self.search_state.matches.iter().enumerate() {
-                        if *m > current || (*m == current) {
-                            best = Some(i);
-                            break;
+                    if let Some(s) = start {
+                        best = Some((s + 1) % total);
+                    } else {
+                        for (i, m) in self.search_state.matches.iter().enumerate() {
+                            if *m >= current {
+                                best = Some(i);
+                                break;
+                            }
                         }
-                    }
-                    if best.is_none() {
-                        best = Some(0);
+                        if best.is_none() {
+                            best = Some(0);
+                        }
                     }
                 }
                 SearchDirection::Backward => {
-                    for (i, m) in self.search_state.matches.iter().enumerate().rev() {
-                        if *m < current || (*m == current) {
-                            best = Some(i);
-                            break;
+                    if let Some(s) = start {
+                        best = Some((s + total - 1) % total);
+                    } else {
+                        for (i, m) in self.search_state.matches.iter().enumerate().rev() {
+                            if *m <= current {
+                                best = Some(i);
+                                break;
+                            }
                         }
-                    }
-                    if best.is_none() {
-                        best = Some(self.search_state.matches.len().saturating_sub(1));
+                        if best.is_none() {
+                            best = Some(total - 1);
+                        }
                     }
                 }
             }
@@ -978,15 +1012,6 @@ impl AppContext {
     pub fn tick(&mut self) {
         self.notifications.retain(|n| !n.expired());
         self.cursor.toggle_blink();
-
-        if self.search_state.current_match.is_some() && !self.search_state.query.is_empty() {
-            if let Some(idx) = self.search_state.current_match {
-                if idx < self.search_state.matches.len() {
-                    let pos = self.search_state.matches[idx];
-                    self.cursor.position = pos;
-                }
-            }
-        }
     }
 
     pub fn get_clipboard_text(&mut self) -> Option<String> {
@@ -1020,3 +1045,5 @@ impl AppContext {
         self.start_time.elapsed()
     }
 }
+
+

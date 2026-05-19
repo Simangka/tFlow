@@ -199,6 +199,7 @@ impl KeyMap {
         add(&mut km, key(KeyCode::Tab, KeyModifiers::NONE), Action::NextBuffer, none);
         add(&mut km, key(KeyCode::Tab, KeyModifiers::SHIFT), Action::PreviousBuffer, none);
         add(&mut km, key(KeyCode::F(1), KeyModifiers::NONE), Action::ToggleFileTree, none);
+        add(&mut km, ctrl('t'), Action::ToggleFileTree, none);
         add(&mut km, key(KeyCode::F(5), KeyModifiers::NONE), Action::ReloadFile, none);
         add(&mut km, key(KeyCode::F(11), KeyModifiers::NONE), Action::ToggleMarkdownPreview, none);
         add(&mut km, ctrl('k'), Action::ToggleMarkdownPreview, none);
@@ -327,3 +328,5 @@ impl Default for KeyMap {
         Self::new_with_defaults()
     }
 }
+
+

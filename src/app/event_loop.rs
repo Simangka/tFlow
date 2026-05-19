@@ -2,6 +2,7 @@ use crate::app::context::AppContext;
 use crate::input::handler::{InputHandler, InputEvent};
 use crate::commands::actions::Action;
 use crate::core::EditMode;
+use crate::workspace::file_tree::TreeDisplayEntry;
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 use ratatui::widgets::{Block, Borders, Paragraph, List, ListItem, Clear, Wrap};
 use ratatui::text::{Span, Line};
@@ -24,6 +25,10 @@ impl EventLoop {
 
         let mut input_handler = InputHandler::new();
         let _input_handle = input_handler.start_reading();
+
+        if let Err(e) = Self::render(&mut terminal, &mut ctx) {
+            eprintln!("Initial render error: {}", e);
+        }
 
         loop {
             let event = input_handler.recv().await;
@@ -95,6 +100,52 @@ impl EventLoop {
         };
         let key = KeyEvent::new(raw_key.code, essential_mods);
         let mode = ctx.editor_mode.mode;
+
+        if ctx.layout.show_file_tree && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::FileTree {
+            if let Some(ref mut ft) = ctx.file_tree {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        ft.navigate_up();
+                        return Ok(());
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        ft.navigate_down();
+                        return Ok(());
+                    }
+                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                        ft.toggle_expand();
+                        if let Some(path) = ft.selected_path() {
+                            if path.is_file() {
+                                let _ = ctx.open_file(path);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        ft.toggle_expand();
+                        return Ok(());
+                    }
+                    KeyCode::Esc => {
+                        ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                        return Ok(());
+                    }
+                    KeyCode::Tab => {
+                        ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Editor {
+            if key.code == KeyCode::Tab && key.modifiers.is_empty() && mode != EditMode::Insert {
+                if ctx.layout.show_file_tree {
+                    ctx.layout.focused_pane = crate::ui::layout::FocusedPane::FileTree;
+                    return Ok(());
+                }
+            }
+        }
 
         match mode {
             EditMode::Command => {
@@ -202,6 +253,11 @@ impl EventLoop {
             }
         }
 
+        if key.code == KeyCode::Esc && mode == EditMode::Normal && !ctx.search_state.query.is_empty() {
+            ctx.search_state = crate::core::SearchState::default();
+            return Ok(());
+        }
+
         if let Some(action) = ctx.keymap.resolve(key, Some(mode)) {
             return ctx.handle_action(&action);
         }
@@ -223,12 +279,20 @@ impl EventLoop {
         terminal.draw(|frame| {
             let area = frame.area();
             let layout = ctx.layout.calculate_layout(area);
+            let editor_height = layout.editor.height as usize;
+            let editor_width = layout.editor.width as usize;
+            ctx.render_engine.set_viewport(editor_height, editor_width);
+            ctx.update_cursor();
+
             let theme = &ctx.theme;
             let buf = &ctx.buffers[ctx.active_buffer];
 
             let bg_style = Style::default().bg(theme.bg);
             frame.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from("")).style(bg_style), area);
 
+            let syntax_ext = buf.path.as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|e| e.to_str());
             ctx.render_engine.render_buffer(
                 frame,
                 layout.editor,
@@ -238,6 +302,8 @@ impl EventLoop {
                 theme,
                 ctx.config.line_numbers.show,
                 ctx.config.line_numbers.relative,
+                syntax_ext,
+                &ctx.search_state,
             );
 
             if ctx.cursor.blink_state {
@@ -271,13 +337,24 @@ impl EventLoop {
                 EditMode::Search => "SEARCH",
             };
 
+            let search_info = if !ctx.search_state.query.is_empty() && !ctx.search_state.matches.is_empty() {
+                let total = ctx.search_state.matches.len();
+                let current = ctx.search_state.current_match.map(|i| i + 1).unwrap_or(0);
+                format!(" [{}/{}]", current, total)
+            } else if !ctx.search_state.query.is_empty() {
+                " [0/0]".to_string()
+            } else {
+                String::new()
+            };
+
             let info_str = format!(
-                " {} | {}:{} | {} lines | {} ",
+                " {} | {}:{} | {} lines | {}{} ",
                 mode_str,
                 ctx.cursor.position.line + 1,
                 ctx.cursor.position.column + 1,
                 buf.line_count(),
                 buf.name,
+                search_info,
             );
 
             if let Some(statusbar_area) = layout.statusbar {
@@ -340,35 +417,53 @@ impl EventLoop {
             if let Some(ref ft) = ctx.file_tree {
                 if ctx.layout.show_file_tree {
                     if let Some(ft_area) = layout.filetree {
-                        let mut ft_items: Vec<ListItem> = ft
-                            .entries
-                            .iter()
-                            .map(|entry| {
-                                let indent = "  ".repeat(entry.depth);
-                                let icon = if entry.is_dir {
-                                    if entry.expanded { "v " } else { "> " }
-                                } else {
-                                    "  "
-                                };
-                                let name = format!("{}{}{}", indent, icon, entry.name);
-                                ListItem::new(Line::from(Span::styled(
-                                    name,
-                                    Style::default().fg(theme.fg),
-                                )))
-                            })
-                            .collect();
+                        let display = ft.display_entries();
+                        let selected = ft.selected.min(display.len().saturating_sub(1));
+                        let scroll = ft.scroll_offset.min(display.len().saturating_sub(1));
+                        let height = ft_area.height.saturating_sub(2) as usize;
+                        let visible: Vec<&TreeDisplayEntry> = display.iter().skip(scroll).take(height).collect();
 
-                        if ft_items.is_empty() {
-                            ft_items.push(ListItem::new(Line::from(Span::styled(
+                        let border_style = if ctx.layout.focused_pane == crate::ui::layout::FocusedPane::FileTree {
+                            Style::default().fg(theme.border_active)
+                        } else {
+                            Style::default().fg(theme.comment)
+                        };
+
+                        let mut items: Vec<ListItem> = visible.iter().enumerate().map(|(vi, de)| {
+                            let abs_idx = scroll + vi;
+                            let is_selected = abs_idx == selected;
+                            let base_style = if is_selected {
+                                Style::default().bg(theme.palette_selection).fg(theme.fg).add_modifier(Modifier::BOLD)
+                            } else if de.entry.is_dir {
+                                Style::default().fg(theme.heading2)
+                            } else {
+                                Style::default().fg(theme.fg)
+                            };
+                            let prefix = if de.entry.is_dir {
+                                if de.entry.expanded { "[-]" } else { "[+]" }
+                            } else {
+                                "   "
+                            };
+                            let line = format!("{}{} {}{}", de.connector, prefix, de.icon, de.display_name);
+                            ListItem::new(Line::from(Span::styled(line, base_style)))
+                        }).collect();
+
+                        if items.is_empty() {
+                            items.push(ListItem::new(Line::from(Span::styled(
                                 " (empty) ",
                                 Style::default().fg(theme.comment),
                             ))));
                         }
 
-                        let ft_list = List::new(ft_items)
-                            .block(Block::default().title(" Files ").borders(Borders::ALL))
-                            .highlight_style(Style::default().bg(theme.palette_selection))
-                            .highlight_symbol(">>");
+                        let title = if ctx.layout.focused_pane == crate::ui::layout::FocusedPane::FileTree {
+                            " Files (focused) "
+                        } else {
+                            " Files "
+                        };
+
+                        let ft_list = List::new(items)
+                            .block(Block::default().title(title).borders(Borders::ALL).border_style(border_style))
+                            .highlight_style(Style::default().bg(theme.palette_selection));
                         frame.render_widget(ft_list, ft_area);
                     }
                 }
@@ -423,13 +518,7 @@ impl EventLoop {
 
             if ctx.layout.show_markdown_preview {
                 if let Some(preview_area) = layout.markdown_preview {
-                    let text = buf.get_text();
-                    let title = if ctx.layout.preview_as_markdown { " Preview (MD) " } else { " Preview " };
-                    let rendered = if ctx.layout.preview_as_markdown {
-                        crate::markdown::renderer::MarkdownRenderer::render(&text, theme)
-                    } else {
-                        crate::markdown::plain::PlainTextRenderer::render(&text, theme)
-                    };
+                    let rendered = crate::markdown::help::HelpScreen::render(theme);
                     let height = preview_area.height.saturating_sub(2) as usize;
                     let scroll = 0usize;
                     let start = scroll.min(rendered.len().saturating_sub(1));
@@ -442,7 +531,7 @@ impl EventLoop {
                     let md_paragraph = Paragraph::new(lines)
                         .block(
                             Block::default()
-                                .title(title)
+                                .title(" tFlow Help ")
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(theme.comment)),
                         )
@@ -490,6 +579,7 @@ impl EventLoop {
                 if let Some(buf) = ctx.buffers.get_mut(ctx.active_buffer) {
                     buf.mode = EditMode::Normal;
                 }
+                ctx.search_state = crate::core::SearchState::default();
             }
             KeyCode::Enter => {
                 let query = ctx.editor_mode.search_buffer.clone();
@@ -512,4 +602,5 @@ impl EventLoop {
             _ => {}
         }
     }
+
 }
