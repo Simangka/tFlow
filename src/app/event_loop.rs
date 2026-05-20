@@ -2,8 +2,12 @@ use crate::app::context::AppContext;
 use crate::input::handler::{InputHandler, InputEvent};
 use crate::commands::actions::Action;
 use crate::core::EditMode;
+use crate::core::Position;
+use crate::editor::cursor::Cursor;
+use crate::editor::selection::Selection;
 use crate::workspace::file_tree::TreeDisplayEntry;
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph, List, ListItem, Clear, Wrap};
 use ratatui::text::{Span, Line};
 use ratatui::style::{Style, Modifier};
@@ -138,6 +142,25 @@ impl EventLoop {
             }
         }
 
+        if ctx.awaiting_split_key {
+            if mode != EditMode::Normal {
+                ctx.awaiting_split_key = false;
+            } else {
+                ctx.awaiting_split_key = false;
+                match key.code {
+                    KeyCode::Char('v') => return ctx.handle_action(&Action::SplitVertical),
+                    KeyCode::Char('s') => return ctx.handle_action(&Action::SplitHorizontal),
+                    KeyCode::Char('q') => return ctx.handle_action(&Action::ClosePane),
+                    KeyCode::Char('w') => return ctx.handle_action(&Action::NextSplit),
+                    KeyCode::Char('h') => return ctx.handle_action(&Action::FocusPaneLeft),
+                    KeyCode::Char('j') => return ctx.handle_action(&Action::FocusPaneDown),
+                    KeyCode::Char('k') => return ctx.handle_action(&Action::FocusPaneUp),
+                    KeyCode::Char('l') => return ctx.handle_action(&Action::FocusPaneRight),
+                    _ => {}
+                }
+            }
+        }
+
         if ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Editor {
             if key.code == KeyCode::Tab && key.modifiers.is_empty() && mode != EditMode::Insert {
                 if ctx.layout.show_file_tree {
@@ -258,6 +281,11 @@ impl EventLoop {
             return Ok(());
         }
 
+        if key.code == KeyCode::Char('w') && key.modifiers == KeyModifiers::CONTROL && mode == EditMode::Normal {
+            ctx.awaiting_split_key = true;
+            return Ok(());
+        }
+
         if let Some(action) = ctx.keymap.resolve(key, Some(mode)) {
             return ctx.handle_action(&action);
         }
@@ -279,51 +307,95 @@ impl EventLoop {
         terminal.draw(|frame| {
             let area = frame.area();
             let layout = ctx.layout.calculate_layout(area);
-            let editor_height = layout.editor.height as usize;
-            let editor_width = layout.editor.width as usize;
-            ctx.render_engine.set_viewport(editor_height, editor_width);
-            ctx.update_cursor();
-
             let theme = &ctx.theme;
-            let buf = &ctx.buffers[ctx.active_buffer];
 
             let bg_style = Style::default().bg(theme.bg);
             frame.render_widget(ratatui::widgets::Paragraph::new(ratatui::text::Line::from("")).style(bg_style), area);
 
-            let syntax_ext = buf.path.as_ref()
-                .and_then(|p| p.extension())
-                .and_then(|e| e.to_str());
-            ctx.render_engine.render_buffer(
-                frame,
-                layout.editor,
-                buf,
-                &ctx.cursor,
-                &ctx.selection,
-                theme,
-                ctx.config.line_numbers.show,
-                ctx.config.line_numbers.relative,
-                syntax_ext,
-                &ctx.search_state,
-            );
+            let pane_layouts = crate::ui::split::layout_split_node(&ctx.split_manager.root, layout.editor);
+            let mut panes_with_rect: Vec<(usize, Rect)> = Vec::new();
+            for (id, rect) in pane_layouts {
+                panes_with_rect.push((id, rect));
+            }
+            let editor_is_split = panes_with_rect.len() > 1;
 
-            if ctx.cursor.blink_state {
-                let cursor_line = ctx.cursor.position.line;
-                let cursor_col = ctx.cursor.position.column;
-                let total_lines = ctx.active_buffer().line_count();
-                let gutter_w = if ctx.config.line_numbers.show {
-                    crate::rendering::line_numbers::LineNumbers::gutter_width(total_lines)
-                } else {
-                    0
-                };
-                let height = layout.editor.height as usize;
-                let scroll_line = ctx.render_engine.scroll_offset.line;
-                let visual_line = cursor_line.wrapping_sub(scroll_line);
-                if visual_line < height {
-                    let text_x = gutter_w + cursor_col as u16;
-                    let y = layout.editor.y + visual_line as u16;
-                    let text_area_width = layout.editor.width.saturating_sub(gutter_w);
-                    if (cursor_col as u16) < text_area_width {
-                        frame.set_cursor_position(ratatui::layout::Position::new(layout.editor.x + text_x, y));
+            let mut pane_render_data: Vec<(usize, Rect, Rect, usize, Position, Cursor, Selection)> = Vec::new();
+            {
+                let mut pane_map: std::collections::HashMap<usize, Rect> = std::collections::HashMap::new();
+                for &(id, rect) in &panes_with_rect {
+                    pane_map.insert(id, rect);
+                }
+                ctx.split_manager.for_each_pane(&mut |p| {
+                    if let Some(&rect) = pane_map.get(&p.id) {
+                        let content_area = if editor_is_split {
+                            Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), rect.height.saturating_sub(2))
+                        } else {
+                            rect
+                        };
+                        pane_render_data.push((p.id, rect, content_area, p.buffer_id, p.scroll_offset, p.cursor.clone(), p.selection.clone()));
+                    }
+                });
+            }
+
+            for (pane_id, outer_rect, content_rect, buffer_id, pane_scroll, pane_cursor, pane_selection) in pane_render_data.into_iter() {
+                let buf = &ctx.buffers[buffer_id];
+                let content_height = content_rect.height as usize;
+                let content_width = content_rect.width as usize;
+
+                if let Some(pane) = ctx.split_manager.pane_by_id(pane_id) {
+                    pane.viewport_height = content_height;
+                    pane.viewport_width = content_width;
+                }
+
+                ctx.render_engine.set_viewport(content_height, content_width);
+                ctx.render_engine.scroll_offset = pane_scroll;
+
+                if editor_is_split {
+                    let border_style = if pane_id == ctx.split_manager.active_pane_id {
+                        Style::default().fg(theme.border_active)
+                    } else {
+                        Style::default().fg(theme.comment)
+                    };
+                    let block = ratatui::widgets::Block::default()
+                        .borders(ratatui::widgets::Borders::ALL)
+                        .border_style(border_style);
+                    frame.render_widget(block, outer_rect);
+                }
+
+                let syntax_ext: Option<&str> = buf.path.as_ref()
+                    .and_then(|p: &std::path::PathBuf| p.extension())
+                    .and_then(|e: &std::ffi::OsStr| e.to_str());
+                ctx.render_engine.render_buffer(
+                    frame,
+                    content_rect,
+                    buf,
+                    &pane_cursor,
+                    &pane_selection,
+                    theme,
+                    ctx.config.line_numbers.show,
+                    ctx.config.line_numbers.relative,
+                    syntax_ext,
+                    &ctx.search_state,
+                );
+
+                if pane_id == ctx.split_manager.active_pane_id && ctx.cursor.blink_state {
+                    let cursor_line = pane_cursor.position.line;
+                    let cursor_col = pane_cursor.position.column;
+                    let total_lines = buf.line_count();
+                    let gutter_w = if ctx.config.line_numbers.show {
+                        crate::rendering::line_numbers::LineNumbers::gutter_width(total_lines)
+                    } else {
+                        0
+                    };
+                    let scroll_line = pane_scroll.line;
+                    let visual_line = cursor_line.wrapping_sub(scroll_line);
+                    if visual_line < content_height {
+                        let text_x = gutter_w + cursor_col as u16;
+                        let y = content_rect.y + visual_line as u16;
+                        let text_area_width = content_rect.width.saturating_sub(gutter_w);
+                        if (cursor_col as u16) < text_area_width {
+                            frame.set_cursor_position(ratatui::layout::Position::new(content_rect.x + text_x, y));
+                        }
                     }
                 }
             }
@@ -347,14 +419,21 @@ impl EventLoop {
                 String::new()
             };
 
+            let active_buf = &ctx.buffers[ctx.active_buffer];
+            let pane_info = if ctx.split_manager.panes_count() > 1 {
+                format!(" [panel {} of {}]", ctx.split_manager.active_pane_id + 1, ctx.split_manager.panes_count())
+            } else {
+                String::new()
+            };
             let info_str = format!(
-                " {} | {}:{} | {} lines | {}{} ",
+                " {} | {}:{} | {} lines | {}{}{} ",
                 mode_str,
                 ctx.cursor.position.line + 1,
                 ctx.cursor.position.column + 1,
-                buf.line_count(),
-                buf.name,
+                active_buf.line_count(),
+                active_buf.name,
                 search_info,
+                pane_info,
             );
 
             if let Some(statusbar_area) = layout.statusbar {
@@ -384,6 +463,16 @@ impl EventLoop {
                     let cmd_bar = Paragraph::new(Line::from(Span::styled(cmd_text, cmd_style)))
                         .style(Style::default().bg(theme.bg));
                     frame.render_widget(cmd_bar, cmd_bar_area);
+                }
+            }
+
+            if ctx.awaiting_split_key && ctx.editor_mode.mode == EditMode::Normal {
+                if let Some(cmd_bar_area) = layout.commandbar {
+                    let hint_style = Style::default().fg(theme.command_bar).bg(theme.bg).add_modifier(Modifier::BOLD);
+                    let hint_text = " Ctrl+w waiting... ";
+                    let hint_bar = Paragraph::new(Line::from(Span::styled(hint_text, hint_style)))
+                        .style(Style::default().bg(theme.bg));
+                    frame.render_widget(hint_bar, cmd_bar_area);
                 }
             }
 

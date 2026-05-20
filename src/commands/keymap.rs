@@ -66,6 +66,7 @@ impl KeyMap {
             KeyCode::Char('y'),
             KeyCode::Char('c'),
             KeyCode::Char('z'),
+            KeyCode::Char('w'),
         ];
 
         let normal = Some(EditMode::Normal);
@@ -141,6 +142,15 @@ impl KeyMap {
         add_seq(&mut km, KeyCode::Char('y'), KeyCode::Char('y'), Action::CopyLine, normal);
         add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('g'), Action::StartOfFile, normal);
 
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('v'), Action::SplitVertical, normal);
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('s'), Action::SplitHorizontal, normal);
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('q'), Action::ClosePane, normal);
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('w'), Action::NextSplit, normal);
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('h'), Action::FocusPaneLeft, normal);
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('j'), Action::FocusPaneDown, normal);
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('k'), Action::FocusPaneUp, normal);
+        add_seq(&mut km, KeyCode::Char('w'), KeyCode::Char('l'), Action::FocusPaneRight, normal);
+
         add(&mut km, shift_char('D'), Action::DeleteToEndOfLine, normal);
         add(&mut km, shift_char('J'), Action::JoinLines, normal);
         add(&mut km, char_key('p'), Action::Paste, normal);
@@ -192,7 +202,7 @@ impl KeyMap {
         add(&mut km, ctrl('y'), Action::Redo, none);
         add(&mut km, ctrl('p'), Action::ShowPalette, none);
         add(&mut km, ctrl('n'), Action::NewFile, none);
-        add(&mut km, ctrl('w'), Action::CloseFile, none);
+        // ctrl+w is used as a leader for split commands
         // ctrl+f is bound to PageDown above for normal mode
         add(&mut km, ctrl('o'), Action::OpenFile, none);
 
@@ -206,6 +216,8 @@ impl KeyMap {
 
         add(&mut km, alt_char('h'), Action::SplitHorizontal, none);
         add(&mut km, alt_char('v'), Action::SplitVertical, none);
+        add(&mut km, alt_char('w'), Action::NextSplit, none);
+        add(&mut km, alt_char('q'), Action::ClosePane, none);
         add(&mut km, alt_char('m'), Action::FocusPreview, none);
 
         km

@@ -24,6 +24,14 @@ static STRING_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#""[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'"#).unwrap()
 });
 
+static FN_RE_DEFAULT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([a-zA-Z_]\w*)\s*\(").unwrap()
+});
+
+static FN_RE_JS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([a-zA-Z_$]\w*)\s*\(").unwrap()
+});
+
 impl SyntaxHighlighter {
     fn get_patterns(ext: &str) -> LanguagePatterns {
         match ext {
@@ -254,12 +262,15 @@ impl SyntaxHighlighter {
             all_ranges.extend(Self::find_pattern(line, &STRING_RE, str_style));
 
             if !patterns.functions.is_empty() {
-                if let Ok(fn_re) = Regex::new(patterns.functions) {
-                    let fn_style = Style::default().fg(theme.syntax_function);
-                    for cap in fn_re.captures_iter(line) {
-                        if let Some(m) = cap.get(1) {
-                            all_ranges.push((m.start(), m.end(), fn_style));
-                        }
+                let fn_re: &Regex = if patterns.functions.contains('$') {
+                    &FN_RE_JS
+                } else {
+                    &FN_RE_DEFAULT
+                };
+                let fn_style = Style::default().fg(theme.syntax_function);
+                for cap in fn_re.captures_iter(line) {
+                    if let Some(m) = cap.get(1) {
+                        all_ranges.push((m.start(), m.end(), fn_style));
                     }
                 }
             }

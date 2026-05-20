@@ -18,7 +18,7 @@
 - **Rope-based engine** — Handles 100k+ line files with low latency
 - **Syntax highlighting** — Language-aware coloring for JavaScript, Python, Rust, JSON, Markdown, and more
 - **Markdown rendering** — Headings, tables, lists, code blocks, blockquotes, checkboxes
-- **File tree browser** — `F1` / `Ctrl+T` to toggle, navigate with arrows/`hjkl`, `Enter` to open
+- **Split panes** — Horizontal (`:sp`) / vertical (`:vs`) splits, keyboard-driven navigation (`Alt+w`/`Alt+q`)
 - **Workspace grep** — Full-text search across workspace files
 - **Full undo/redo** — With change-grouping for natural history
 - **Clipboard** — System clipboard integration (copy, cut, paste)
@@ -154,11 +154,17 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | Command | Action |
 |---------|--------|
 | `:w` | Save file |
-| `:q` | Quit |
+| `:q` | Quit (closes pane if in split, quits app if single) |
 | `:wq` | Save and quit |
 | `:q!` | Force quit |
 | `:e <file>` | Open file |
-| `:new` | New buffer |
+| `:new` | New buffer in horizontal split |
+| `:vnew` | New buffer in vertical split |
+| `:sp` / `:split` | Horizontal split with current buffer |
+| `:sp <file>` / `:split <file>` | Open file in horizontal split |
+| `:vs` / `:vsplit` | Vertical split with current buffer |
+| `:vs <file>` / `:vsplit <file>` | Open file in vertical split |
+| `:close` | Close current split pane |
 | `:help` | Show help screen |
 
 #### File tree (`F1` / `Ctrl+T`)
@@ -170,6 +176,15 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | `Enter` / `→` / `l` | Expand directory / open file |
 | `←` / `h` | Collapse directory |
 | `Esc` / `Tab` | Return focus to editor |
+
+#### Split panes
+
+| Key | Action |
+|-----|--------|
+| `Alt+h` | Horizontal split |
+| `Alt+v` | Vertical split |
+| `Alt+w` | Focus next pane |
+| `Alt+q` | Close current pane |
 
 #### Global
 
@@ -263,7 +278,7 @@ Upcoming features planned:
 |---------|--------|
 | Word completion (buffer-scan) | 🔜 Planned |
 | Fuzzy file finder (Ctrl+P) | 🔜 Planned |
-| Split panes (vertical/horizontal) | 🔜 Planned |
+| Split panes (vertical/horizontal) | ✅ Done |
 | Session save/restore | 🔜 Planned |
 | Multi-cursor (Ctrl+D) | 🔜 Planned |
 | Macro recording/playback | 🔜 Planned |

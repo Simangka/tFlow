@@ -16,6 +16,7 @@ use crate::workspace::search::WorkspaceSearcher;
 use crate::async_tasks::task_queue::TaskQueue;
 use crate::rendering::engine::RenderEngine;
 use crate::ui::UILayout;
+use crate::ui::split::SplitManager;
 
 pub struct AppContext {
     pub buffers: Vec<Buffer>,
@@ -43,6 +44,8 @@ pub struct AppContext {
     pub is_recording: bool,
     pub recorded_macro: Vec<Action>,
     pub start_time: std::time::Instant,
+    pub split_manager: SplitManager,
+    pub awaiting_split_key: bool,
 }
 
 impl AppContext {
@@ -78,6 +81,7 @@ impl AppContext {
 
         let clipboard = arboard::Clipboard::new().ok();
 
+        let split_buf_id = 0;
         Self {
             buffers,
             active_buffer: 0,
@@ -104,6 +108,8 @@ impl AppContext {
             is_recording: false,
             recorded_macro: Vec::new(),
             start_time: std::time::Instant::now(),
+            split_manager: SplitManager::new(split_buf_id),
+            awaiting_split_key: false,
         }
     }
 
@@ -136,7 +142,11 @@ impl AppContext {
 
     pub fn switch_buffer(&mut self, id: usize) -> bool {
         if id < self.buffers.len() {
+            self.sync_to_pane();
             self.active_buffer = id;
+            if let Some(pane) = self.split_manager.active_pane() {
+                pane.buffer_id = id;
+            }
             self.cursor.position = self.buffers[id].cursor;
             self.cursor.preferred_column = self.buffers[id].cursor.column;
             self.editor_mode.mode = self.buffers[id].mode;
@@ -149,24 +159,40 @@ impl AppContext {
 
     pub fn open_file(&mut self, path: std::path::PathBuf) -> Result<usize, anyhow::Error> {
         let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
-        for (i, buf) in self.buffers.iter().enumerate() {
-            if let Some(ref bp) = buf.path {
-                if *bp == canonical || *bp == path {
-                    self.active_buffer = i;
-                    self.cursor.position = buf.cursor;
-                    self.cursor.preferred_column = buf.cursor.column;
-                    self.editor_mode.mode = buf.mode;
-                    self.selection.clear();
-                    return Ok(i);
+        let existing = {
+            let mut result = None;
+            for (i, buf) in self.buffers.iter().enumerate() {
+                if let Some(ref bp) = buf.path {
+                    if *bp == canonical || *bp == path {
+                        result = Some((i, buf.cursor, buf.mode));
+                        break;
+                    }
                 }
             }
+            result
+        };
+        if let Some((i, cursor_pos, mode)) = existing {
+            self.sync_to_pane();
+            self.active_buffer = i;
+            if let Some(pane) = self.split_manager.active_pane() {
+                pane.buffer_id = i;
+            }
+            self.cursor.position = cursor_pos;
+            self.cursor.preferred_column = cursor_pos.column;
+            self.editor_mode.mode = mode;
+            self.selection.clear();
+            return Ok(i);
         }
 
         let id = self.buffers.len();
         let buffer = Buffer::from_path(id, path)?;
         self.buffers.push(buffer);
         self.histories.push(History::new(100));
+        self.sync_to_pane();
         self.active_buffer = id;
+        if let Some(pane) = self.split_manager.active_pane() {
+            pane.buffer_id = id;
+        }
         self.cursor = Cursor::new();
         self.editor_mode.mode = EditMode::Normal;
         self.selection.clear();
@@ -183,11 +209,16 @@ impl AppContext {
             return false;
         }
 
+        self.sync_to_pane();
         self.buffers.remove(self.active_buffer);
         self.histories.remove(self.active_buffer);
 
         if self.active_buffer >= self.buffers.len() {
             self.active_buffer = self.buffers.len().saturating_sub(1);
+        }
+
+        if let Some(pane) = self.split_manager.active_pane() {
+            pane.buffer_id = self.active_buffer;
         }
 
         self.cursor.position = self.buffers[self.active_buffer].cursor;
@@ -208,6 +239,24 @@ impl AppContext {
             line_count: buf.line_count(),
             cursor: self.cursor.position,
             mode: buf.mode,
+        }
+    }
+
+    pub fn sync_from_pane(&mut self) {
+        if let Some(pane) = self.split_manager.active_pane() {
+            self.cursor = pane.cursor.clone();
+            self.selection = pane.selection.clone();
+            self.active_buffer = pane.buffer_id;
+            self.render_engine.scroll_offset = pane.scroll_offset;
+        }
+    }
+
+    pub fn sync_to_pane(&mut self) {
+        if let Some(pane) = self.split_manager.active_pane() {
+            pane.cursor = self.cursor.clone();
+            pane.selection = self.selection.clone();
+            pane.buffer_id = self.active_buffer;
+            pane.scroll_offset = self.render_engine.scroll_offset;
         }
     }
 
@@ -236,7 +285,11 @@ impl AppContext {
             let buf = self.active_buffer_mut();
             buf.cursor = clamped;
         }
-        let vh = self.render_engine.viewport_height;
+        let vh = if let Some(pane) = self.split_manager.active_pane() {
+            pane.viewport_height
+        } else {
+            self.render_engine.viewport_height
+        };
         let scrolloff = self.config.editor.scrolloff.min(vh / 2);
         if vh > 0 {
             let max_scroll = line_count.saturating_sub(vh);
@@ -263,6 +316,56 @@ impl AppContext {
         }
 
         let _mode = self.editor_mode.mode;
+
+        match action {
+            Action::SplitHorizontal => {
+                self.sync_to_pane();
+                self.split_manager.split_horizontal(self.active_buffer);
+                self.push_info("Split horizontal");
+                self.sync_from_pane();
+                self.update_cursor();
+                return Ok(());
+            }
+            Action::SplitVertical => {
+                self.sync_to_pane();
+                self.split_manager.split_vertical(self.active_buffer);
+                self.push_info("Split vertical");
+                self.sync_from_pane();
+                self.update_cursor();
+                return Ok(());
+            }
+            Action::ClosePane => {
+                if self.split_manager.panes_count() <= 1 {
+                    self.push_info("Cannot close last pane");
+                    return Ok(());
+                }
+                let active_id = self.split_manager.active_pane_id;
+                self.sync_to_pane();
+                self.split_manager.close_pane(active_id);
+                self.sync_from_pane();
+                self.update_cursor();
+                return Ok(());
+            }
+            Action::NextSplit | Action::FocusPaneRight | Action::FocusPaneDown => {
+                self.sync_to_pane();
+                self.split_manager.focus_next();
+                self.sync_from_pane();
+                self.update_cursor();
+                return Ok(());
+            }
+            Action::PreviousSplit | Action::FocusPaneLeft | Action::FocusPaneUp => {
+                self.sync_to_pane();
+                self.split_manager.focus_prev();
+                self.sync_from_pane();
+                self.update_cursor();
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        if self.split_manager.panes_count() > 1 {
+            self.sync_from_pane();
+        }
 
         match action {
             Action::MoveLeft => {
@@ -793,16 +896,23 @@ impl AppContext {
                         let _ = self.handle_action(&Action::SaveFile);
                     }
                     "q" | "quit" => {
-                        let has_dirty = self.buffers.iter().any(|b| b.dirty);
-                        if has_dirty && !self.force_quit {
-                            self.push_error("Unsaved changes. Use 'q!' or force quit");
+                        if self.split_manager.panes_count() > 1 {
+                            let _ = self.handle_action(&Action::ClosePane);
                         } else {
-                            self.quit_requested = true;
+                            let has_dirty = self.buffers.iter().any(|b| b.dirty);
+                            if has_dirty && !self.force_quit {
+                                self.push_error("Unsaved changes. Use 'q!' or force quit");
+                            } else {
+                                self.quit_requested = true;
+                            }
                         }
                     }
                     "q!" => {
                         self.force_quit = true;
                         self.quit_requested = true;
+                    }
+                    "close" => {
+                        let _ = self.handle_action(&Action::ClosePane);
                     }
                     "wq" => {
                         let _ = self.handle_action(&Action::SaveFile);
@@ -815,17 +925,62 @@ impl AppContext {
                             let _ = self.open_file(path);
                         }
                     }
+                    s if s.starts_with("split ") || s.starts_with("sp ") => {
+                        let path_str = s.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                        if path_str.is_empty() {
+                            self.handle_action(&Action::SplitHorizontal).ok();
+                        } else {
+                            let path = std::path::PathBuf::from(path_str);
+                            if let Ok(buf_id) = self.open_file(path) {
+                                self.split_manager.split_horizontal(buf_id);
+                                self.sync_from_pane();
+                            }
+                        }
+                    }
+                    "split" | "sp" => {
+                        self.handle_action(&Action::SplitHorizontal).ok();
+                    }
+                    s if s.starts_with("vsplit ") || s.starts_with("vs ") => {
+                        let path_str = s.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                        if path_str.is_empty() {
+                            self.handle_action(&Action::SplitVertical).ok();
+                        } else {
+                            let path = std::path::PathBuf::from(path_str);
+                            if let Ok(buf_id) = self.open_file(path) {
+                                self.split_manager.split_vertical(buf_id);
+                                self.sync_from_pane();
+                            }
+                        }
+                    }
+                    "vsplit" | "vs" => {
+                        self.handle_action(&Action::SplitVertical).ok();
+                    }
                     "help" => {
-                        self.push_info("tflow: :w save, :q quit, :wq save+quit, :e <file> open, :new new buffer, :help help");
+                        self.push_info("tflow: :w save, :q quit, :wq save+quit, :e <file> open, :sp <file> split, :vs <file> vsplit, :new new buffer, :vnew new vsplit buffer, :help help");
                     }
                     "new" => {
                         let id = self.buffers.len();
                         self.buffers.push(Buffer::new(id));
                         self.histories.push(History::new(100));
+                        self.sync_to_pane();
+                        self.split_manager.split_horizontal(id);
                         self.active_buffer = id;
                         self.cursor = crate::editor::cursor::Cursor::new();
                         self.editor_mode.mode = EditMode::Normal;
                         self.selection.clear();
+                        self.sync_from_pane();
+                    }
+                    "vnew" => {
+                        let id = self.buffers.len();
+                        self.buffers.push(Buffer::new(id));
+                        self.histories.push(History::new(100));
+                        self.sync_to_pane();
+                        self.split_manager.split_vertical(id);
+                        self.active_buffer = id;
+                        self.cursor = crate::editor::cursor::Cursor::new();
+                        self.editor_mode.mode = EditMode::Normal;
+                        self.selection.clear();
+                        self.sync_from_pane();
                     }
                     _ => {
                         self.push_error(format!("Unknown command: {}", cmd));
@@ -919,6 +1074,9 @@ impl AppContext {
         }
 
         self.update_cursor();
+        if self.split_manager.panes_count() > 1 {
+            self.sync_to_pane();
+        }
         Ok(())
     }
 
@@ -1038,7 +1196,13 @@ impl AppContext {
             EditMode::Command => "COMMAND",
             EditMode::Search => "SEARCH",
         };
-        format!("tflow - {}{} - {} - {}:{}", name, modified, mode, self.cursor.position.line + 1, self.cursor.position.column + 1)
+        let pane_count = self.split_manager.panes_count();
+        let pane_info = if pane_count > 1 {
+            format!(" [{}:{}]", self.split_manager.active_pane_id, pane_count)
+        } else {
+            String::new()
+        };
+        format!("tflow - {}{} - {}{} - {}:{}", name, modified, mode, pane_info, self.cursor.position.line + 1, self.cursor.position.column + 1)
     }
 
     pub fn total_elapsed(&self) -> std::time::Duration {
