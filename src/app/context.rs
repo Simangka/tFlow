@@ -1117,9 +1117,7 @@ impl AppContext {
         }
 
         self.update_cursor();
-        if self.split_manager.panes_count() > 1 {
-            self.sync_to_pane();
-        }
+        self.sync_to_pane();
         Ok(())
     }
 
