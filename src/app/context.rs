@@ -8,7 +8,7 @@ use crate::editor::operations::EditOperations;
 use crate::commands::keymap::KeyMap;
 use crate::commands::registry::CommandRegistry;
 use crate::commands::actions::Action;
-use crate::commands::palette::CommandPalette;
+use crate::commands::palette::{CommandPalette, PaletteMode};
 use crate::config::Config;
 use crate::theme::Theme;
 use crate::workspace::file_tree::FileTree;
@@ -779,7 +779,23 @@ impl AppContext {
                 EditOperations::apply_movement(buf, &mut self.cursor, Movement::MatchingBrace);
             }
             Action::FuzzyFindFile => {
-                self.push_info("Fuzzy find: Ctrl+p for palette, :e <file> to open");
+                let root = self.config.workspace.root_path.clone()
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                use ignore::WalkBuilder;
+                let file_paths: Vec<String> = WalkBuilder::new(&root)
+                    .hidden(false)
+                    .git_ignore(true)
+                    .build()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+                    .map(|e| e.path().to_string_lossy().to_string())
+                    .collect();
+                if file_paths.is_empty() {
+                    self.push_error("No files found in workspace");
+                    return Ok(());
+                }
+                self.palette.set_files(file_paths);
+                self.palette.show(PaletteMode::Files);
             }
             Action::Quit => {
                 let has_dirty = self.buffers.iter().any(|b| b.dirty);
@@ -956,7 +972,7 @@ impl AppContext {
                         self.handle_action(&Action::SplitVertical).ok();
                     }
                     "help" => {
-                        self.push_info("tflow: :w save, :q quit, :wq save+quit, :e <file> open, :sp <file> split, :vs <file> vsplit, :new new buffer, :vnew new vsplit buffer, :help help");
+                        self.push_info("tflow: :w save, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, Ctrl+Shift+P find file, :help help");
                     }
                     "new" => {
                         let id = self.buffers.len();

@@ -19,6 +19,10 @@ fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
+fn ctrl_shift(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c.to_ascii_uppercase()), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+}
+
 fn char_key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
@@ -201,6 +205,7 @@ impl KeyMap {
         add(&mut km, ctrl('z'), Action::Undo, none);
         add(&mut km, ctrl('y'), Action::Redo, none);
         add(&mut km, ctrl('p'), Action::ShowPalette, none);
+        add(&mut km, ctrl_shift('p'), Action::FuzzyFindFile, none);
         add(&mut km, ctrl('n'), Action::NewFile, none);
         // ctrl+w is used as a leader for split commands
         // ctrl+f is bound to PageDown above for normal mode
