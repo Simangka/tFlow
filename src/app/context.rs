@@ -497,6 +497,9 @@ impl AppContext {
                 let buf = self.buffers.get_mut(self.active_buffer).ok_or("No active buffer")?;
                 buf.save().map_err(|e| format!("Save failed: {}", e))?;
                 self.push_success("File saved");
+                if let Some(ref mut ft) = self.file_tree {
+                    let _ = ft.refresh();
+                }
             }
             Action::SaveFileAs => {
                 let buf = self.buffers.get_mut(self.active_buffer).ok_or("No active buffer")?;
@@ -949,7 +952,12 @@ impl AppContext {
                             };
                             if let Some(buf) = self.buffers.get_mut(self.active_buffer) {
                                 match buf.save_as(path) {
-                                    Ok(()) => self.push_success("File saved"),
+                                    Ok(()) => {
+                                        self.push_success("File saved");
+                                        if let Some(ref mut ft) = self.file_tree {
+                                            let _ = ft.refresh();
+                                        }
+                                    }
                                     Err(e) => self.push_error(format!("Save failed: {}", e)),
                                 }
                             }
