@@ -155,6 +155,7 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | Command | Action |
 |---------|--------|
 | `:w` | Save file |
+| `:w <file>` / `:save <file>` | Save as (sets buffer filename) |
 | `:q` | Quit (closes pane if in split, quits app if single) |
 | `:wq` | Save and quit |
 | `:q!` | Force quit |
