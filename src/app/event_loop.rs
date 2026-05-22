@@ -1,6 +1,7 @@
 use crate::app::context::AppContext;
 use crate::input::handler::{InputHandler, InputEvent};
 use crate::commands::actions::Action;
+use crate::commands::palette::PaletteMode;
 use crate::core::EditMode;
 use crate::core::Position;
 use crate::editor::cursor::Cursor;
@@ -571,23 +572,31 @@ impl EventLoop {
                             };
                             ListItem::new(Line::from(vec![
                                 Span::styled(
-                                    format!(" {} ", item.label),
+                                    format!(" {}", item.label),
                                     style.add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
-                                    format!(" - {}", item.description),
+                                    format!("  {}", item.description),
                                     Style::default().fg(theme.comment).bg(style.bg.unwrap_or(theme.palette)),
                                 ),
                             ]))
                         })
                         .collect();
 
+                    let title = match ctx.palette.mode {
+                        PaletteMode::Files => {
+                            format!(" Files{} ", if ctx.palette.query.is_empty() { String::new() } else { format!(": {}", ctx.palette.query) })
+                        }
+                        PaletteMode::Commands => format!(" Commands: {} ", ctx.palette.query),
+                        _ => format!(" {} ", ctx.palette.query),
+                    };
+
                     let palette_list = List::new(items)
                         .block(
                             Block::default()
-                                .title(format!(" Palette: {}", ctx.palette.query))
+                                .title(title)
                                 .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme.fg)),
+                                .border_style(Style::default().fg(theme.border_active)),
                         )
                         .style(Style::default().bg(theme.palette));
 

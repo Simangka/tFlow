@@ -1,3 +1,4 @@
+use std::path::Path;
 use crate::core::{Position, Range, EditMode, Notification, BufferInfo, SearchState, Movement, SearchDirection};
 use crate::core::buffer::Buffer;
 use crate::editor::cursor::Cursor;
@@ -46,6 +47,9 @@ pub struct AppContext {
     pub start_time: std::time::Instant,
     pub split_manager: SplitManager,
     pub awaiting_split_key: bool,
+    pub cached_files: Vec<String>,
+    pub cached_files_root: std::path::PathBuf,
+    pub cached_files_stamp: std::time::Instant,
 }
 
 impl AppContext {
@@ -82,6 +86,8 @@ impl AppContext {
         let clipboard = arboard::Clipboard::new().ok();
 
         let split_buf_id = 0;
+        let root = config.workspace.root_path.clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         Self {
             buffers,
             active_buffer: 0,
@@ -110,6 +116,9 @@ impl AppContext {
             start_time: std::time::Instant::now(),
             split_manager: SplitManager::new(split_buf_id),
             awaiting_split_key: false,
+            cached_files: Vec::new(),
+            cached_files_root: root.clone(),
+            cached_files_stamp: std::time::Instant::now(),
         }
     }
 
@@ -782,20 +791,35 @@ impl AppContext {
             Action::FuzzyFindFile => {
                 let root = self.config.workspace.root_path.clone()
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                use ignore::WalkBuilder;
-                let file_paths: Vec<String> = WalkBuilder::new(&root)
-                    .hidden(false)
-                    .git_ignore(true)
-                    .build()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-                    .map(|e| e.path().to_string_lossy().to_string())
-                    .collect();
-                if file_paths.is_empty() {
+                if self.cached_files.is_empty() || self.cached_files_root != root {
+                    self.cached_files.clear();
+                    self.push_info("Scanning workspace...");
+                    use ignore::WalkBuilder;
+                    let now = std::time::Instant::now();
+                    let paths: Vec<String> = WalkBuilder::new(&root)
+                        .hidden(false)
+                        .git_ignore(true)
+                        .build()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+                        .map(|e| e.path().to_string_lossy().to_string())
+                        .collect();
+                    self.cached_files = paths;
+                    self.cached_files_root = root.clone();
+                    self.cached_files_stamp = now;
+                }
+                if self.cached_files.is_empty() {
                     self.push_error("No files found in workspace");
                     return Ok(());
                 }
-                self.palette.set_files(file_paths);
+                // Sort: root-level files first, then subdirectory files
+                let mut files = self.cached_files.clone();
+                files.sort_by(|a, b| {
+                    let a_root = Path::new(a).parent() == Some(&root);
+                    let b_root = Path::new(b).parent() == Some(&root);
+                    if a_root != b_root { b_root.cmp(&a_root) } else { a.cmp(b) }
+                });
+                self.palette.set_files(files);
                 self.palette.show(PaletteMode::Files);
                 self.layout.show_palette = true;
             }
