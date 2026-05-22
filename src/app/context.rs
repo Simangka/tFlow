@@ -512,6 +512,7 @@ impl AppContext {
                 }
                 self.selection.clear();
                 self.palette.visible = false;
+                self.layout.show_palette = false;
                 self.search_state = SearchState::default();
             }
             Action::SwitchToVisualMode => {
@@ -796,6 +797,7 @@ impl AppContext {
                 }
                 self.palette.set_files(file_paths);
                 self.palette.show(PaletteMode::Files);
+                self.layout.show_palette = true;
             }
             Action::Quit => {
                 let has_dirty = self.buffers.iter().any(|b| b.dirty);
@@ -846,6 +848,7 @@ impl AppContext {
             }
             Action::ShowPalette => {
                 self.palette.toggle();
+                self.layout.show_palette = self.palette.visible;
             }
             Action::ToggleFileTree => {
                 self.layout.show_file_tree = !self.layout.show_file_tree;

@@ -241,6 +241,7 @@ impl EventLoop {
             match key.code {
                 KeyCode::Esc => {
                     ctx.palette.visible = false;
+                    ctx.layout.show_palette = false;
                     return Ok(());
                 }
                 KeyCode::Enter => {
@@ -252,6 +253,7 @@ impl EventLoop {
                             _ => return Ok(()),
                         };
                         ctx.palette.visible = false;
+                        ctx.layout.show_palette = false;
                         return ctx.handle_action(&action);
                     }
                     return Ok(());
