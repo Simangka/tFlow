@@ -23,8 +23,8 @@
 - **Full undo/redo** — With change-grouping for natural history
 - **Clipboard** — System clipboard integration (copy, cut, paste)
 - **Multi-buffer** — Switch between open files
-- **Command palette** — `Ctrl+P` fuzzy-find any command
-- **Fuzzy file finder** — `Ctrl+Shift+P` search and open any workspace file
+- **Fuzzy file finder** — `Ctrl+P` search and open any workspace file
+- **Command palette** — `Ctrl+Shift+P` fuzzy-find any command
 - **User config** — TOML config at `~/.config/tflow/config.toml`
 - **5 themes** — retro_green (default), amber, synthwave, tokyo_night, default_dark
 - **Autosave + recovery** — Background auto-save and crash recovery files
@@ -193,8 +193,8 @@ Search highlighting is automatically cleared when you start editing or press `Es
 |-----|--------|
 | `Ctrl+s` | Save |
 | `Ctrl+q` | Quit |
-| `Ctrl+p` | Command palette |
-| `Ctrl+Shift+P` | Fuzzy file finder |
+| `Ctrl+p` | Fuzzy file finder |
+| `Ctrl+Shift+P` | Command palette |
 | `Ctrl+t` / `F1` | Toggle file tree |
 | `Ctrl+k` / `F11` | Toggle help preview |
 
@@ -279,7 +279,7 @@ Upcoming features planned:
 | Feature | Status |
 |---------|--------|
 | Word completion (buffer-scan) | 🔜 Planned |
-| Fuzzy file finder (Ctrl+Shift+P) | ✅ Done |
+| Fuzzy file finder (Ctrl+P) | ✅ Done |
 | Split panes (vertical/horizontal) | ✅ Done |
 | Session save/restore | 🔜 Planned |
 | Multi-cursor (Ctrl+D) | 🔜 Planned |
