@@ -935,8 +935,25 @@ impl AppContext {
             Action::ExecuteCommand(cmd) => {
                 let lower = cmd.to_lowercase();
                 match lower.as_str() {
-                    "w" | "write" => {
+                    "w" | "write" | "s" | "save" => {
                         let _ = self.handle_action(&Action::SaveFile);
+                    }
+                    s if s.starts_with("w ") || s.starts_with("write ") || s.starts_with("s ") || s.starts_with("save ") => {
+                        let path_str = s.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                        if !path_str.is_empty() {
+                            let path = std::path::PathBuf::from(path_str);
+                            let path = if path.is_relative() {
+                                std::env::current_dir().unwrap_or_default().join(&path)
+                            } else {
+                                path
+                            };
+                            if let Some(buf) = self.buffers.get_mut(self.active_buffer) {
+                                match buf.save_as(path) {
+                                    Ok(()) => self.push_success("File saved"),
+                                    Err(e) => self.push_error(format!("Save failed: {}", e)),
+                                }
+                            }
+                        }
                     }
                     "q" | "quit" => {
                         if self.split_manager.panes_count() > 1 {
@@ -999,7 +1016,7 @@ impl AppContext {
                         self.handle_action(&Action::SplitVertical).ok();
                     }
                     "help" => {
-                        self.push_info("tflow: :w save, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, Ctrl+Shift+P find file, :help help");
+                        self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, Ctrl+P find file, :help help");
                     }
                     "new" => {
                         let id = self.buffers.len();
