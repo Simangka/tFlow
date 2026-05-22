@@ -100,18 +100,12 @@ impl UILayout {
         let palette = if self.show_palette {
             let palette_height = 20.min(remaining.height.saturating_sub(4));
             let top_margin = (remaining.height.saturating_sub(palette_height)) / 2;
-            let palette_area = Rect::new(
+            Some(Rect::new(
                 remaining.x + 4,
                 remaining.y + top_margin,
                 remaining.width.saturating_sub(8),
                 palette_height,
-            );
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(top_margin), Constraint::Min(0)])
-                .split(remaining);
-            remaining = chunks[1];
-            Some(palette_area)
+            ))
         } else {
             None
         };

@@ -170,6 +170,47 @@ impl EventLoop {
             }
         }
 
+        if ctx.palette.visible {
+            match key.code {
+                KeyCode::Esc => {
+                    ctx.palette.visible = false;
+                    ctx.layout.show_palette = false;
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if let Some(item) = ctx.palette.selected_item() {
+                        let action = match &item.action {
+                            crate::commands::palette::PaletteAction::Action(a) => a.clone(),
+                            crate::commands::palette::PaletteAction::Command(cmd) => Action::ExecuteCommand(cmd.clone()),
+                            crate::commands::palette::PaletteAction::File(path) => Action::OpenFileAt(path.clone()),
+                            _ => return Ok(()),
+                        };
+                        ctx.palette.visible = false;
+                        ctx.layout.show_palette = false;
+                        return ctx.handle_action(&action);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Up => {
+                    ctx.palette.select_prev();
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    ctx.palette.select_next();
+                    return Ok(());
+                }
+                KeyCode::Char(c) => {
+                    ctx.palette.push_char(c);
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    ctx.palette.pop_char();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         match mode {
             EditMode::Command => {
                 Self::handle_command_mode(ctx, key);
@@ -222,60 +263,7 @@ impl EventLoop {
                     _ => {}
                 }
             }
-            _ => {
-                match key.code {
-                    KeyCode::Left => return ctx.handle_action(&Action::MoveLeft),
-                    KeyCode::Right => return ctx.handle_action(&Action::MoveRight),
-                    KeyCode::Up => return ctx.handle_action(&Action::MoveUp),
-                    KeyCode::Down => return ctx.handle_action(&Action::MoveDown),
-                    KeyCode::Home => return ctx.handle_action(&Action::StartOfLine),
-                    KeyCode::End => return ctx.handle_action(&Action::EndOfLine),
-                    KeyCode::PageUp => return ctx.handle_action(&Action::PageUp),
-                    KeyCode::PageDown => return ctx.handle_action(&Action::PageDown),
-                    _ => {}
-                }
-            }
-        }
-
-        if ctx.palette.visible {
-            match key.code {
-                KeyCode::Esc => {
-                    ctx.palette.visible = false;
-                    ctx.layout.show_palette = false;
-                    return Ok(());
-                }
-                KeyCode::Enter => {
-                    if let Some(item) = ctx.palette.selected_item() {
-                        let action = match &item.action {
-                            crate::commands::palette::PaletteAction::Action(a) => a.clone(),
-                            crate::commands::palette::PaletteAction::Command(cmd) => Action::ExecuteCommand(cmd.clone()),
-                            crate::commands::palette::PaletteAction::File(path) => Action::OpenFileAt(path.clone()),
-                            _ => return Ok(()),
-                        };
-                        ctx.palette.visible = false;
-                        ctx.layout.show_palette = false;
-                        return ctx.handle_action(&action);
-                    }
-                    return Ok(());
-                }
-                KeyCode::Up => {
-                    ctx.palette.select_prev();
-                    return Ok(());
-                }
-                KeyCode::Down => {
-                    ctx.palette.select_next();
-                    return Ok(());
-                }
-                KeyCode::Char(c) => {
-                    ctx.palette.push_char(c);
-                    return Ok(());
-                }
-                KeyCode::Backspace => {
-                    ctx.palette.pop_char();
-                    return Ok(());
-                }
-                _ => {}
-            }
+            _ => {}
         }
 
         if key.code == KeyCode::Esc && mode == EditMode::Normal && !ctx.search_state.query.is_empty() {
