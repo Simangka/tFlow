@@ -143,6 +143,61 @@ impl EventLoop {
             }
         }
 
+        if ctx.staging_panel.visible && ctx.layout.focused_pane != crate::ui::layout::FocusedPane::FileTree {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    ctx.staging_panel.select_prev();
+                    return Ok(());
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    ctx.staging_panel.select_next();
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if let Some(entry) = ctx.staging_panel.selected_entry().cloned() {
+                        if let crate::git::staging_panel::StagingEntry::File(s) = entry {
+                            if s.staged {
+                                let _ = ctx.git_manager.unstage_file(
+                                    &std::env::current_dir().unwrap_or_default().join(&s.path),
+                                    &s.path,
+                                );
+                            } else {
+                                let _ = ctx.git_manager.stage_file(
+                                    &std::env::current_dir().unwrap_or_default().join(&s.path),
+                                    &s.path,
+                                );
+                            }
+                            if let Some(buf) = ctx.buffers.get(ctx.active_buffer) {
+                                if let Some(ref p) = buf.path {
+                                    ctx.staging_panel.refresh(&mut ctx.git_manager, p);
+                                }
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(entry) = ctx.staging_panel.selected_entry().cloned() {
+                        if let crate::git::staging_panel::StagingEntry::File(s) = entry {
+                            ctx.staging_panel.toggle_expand(&s.path);
+                            if let Some(buf) = ctx.buffers.get(ctx.active_buffer) {
+                                if let Some(ref p) = buf.path {
+                                    ctx.staging_panel.refresh(&mut ctx.git_manager, p);
+                                }
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                KeyCode::Esc | KeyCode::Tab => {
+                    ctx.staging_panel.visible = false;
+                    ctx.layout.show_staging_panel = false;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         if ctx.awaiting_split_key {
             if mode != EditMode::Normal {
                 ctx.awaiting_split_key = false;
@@ -356,6 +411,17 @@ impl EventLoop {
                 let syntax_ext: Option<&str> = buf.path.as_ref()
                     .and_then(|p: &std::path::PathBuf| p.extension())
                     .and_then(|e: &std::ffi::OsStr| e.to_str());
+                let file_blame: Option<Vec<Option<crate::git::BlameInfo>>> = if ctx.show_blame {
+                    buf.path.as_ref().and_then(|p| {
+                        ctx.git_manager.get_blame(p).map(|b| {
+                            let max_line = buf.line_count();
+                            (0..max_line).map(|i| {
+                                b.iter().find(|bl| bl.line == i).cloned()
+                            }).collect()
+                        })
+                    })
+                } else { None };
+                let blame_ref = file_blame.as_ref().map(|v| &v[..]);
                 ctx.render_engine.render_buffer(
                     frame,
                     content_rect,
@@ -367,6 +433,7 @@ impl EventLoop {
                     ctx.config.line_numbers.relative,
                     syntax_ext,
                     &ctx.search_state,
+                    blame_ref,
                 );
 
                 if pane_id == ctx.split_manager.active_pane_id && ctx.cursor.blink_state {
@@ -378,12 +445,17 @@ impl EventLoop {
                     } else {
                         0
                     };
+                    let blame_w = if ctx.show_blame {
+                        if let Some(ref bd) = file_blame {
+                            crate::rendering::blame_gutter::compute_width(bd)
+                        } else { 0 }
+                    } else { 0 };
                     let scroll_line = pane_scroll.line;
                     let visual_line = cursor_line.wrapping_sub(scroll_line);
                     if visual_line < content_height {
-                        let text_x = gutter_w + cursor_col as u16;
+                        let text_x = gutter_w + blame_w + cursor_col as u16;
                         let y = content_rect.y + visual_line as u16;
-                        let text_area_width = content_rect.width.saturating_sub(gutter_w);
+                        let text_area_width = content_rect.width.saturating_sub(gutter_w + blame_w);
                         if (cursor_col as u16) < text_area_width {
                             frame.set_cursor_position(ratatui::layout::Position::new(content_rect.x + text_x, y));
                         }
@@ -546,6 +618,48 @@ impl EventLoop {
                             .highlight_style(Style::default().bg(theme.palette_selection));
                         frame.render_widget(ft_list, ft_area);
                     }
+                }
+            }
+
+            if ctx.staging_panel.visible {
+                if let Some(staging_area) = layout.staging_panel {
+                    frame.render_widget(Clear, staging_area);
+
+                    let entries = &ctx.staging_panel.data;
+                    let items: Vec<ListItem> = entries.iter().enumerate().map(|(i, entry)| {
+                        let is_selected = i == ctx.staging_panel.selected;
+                        let (label, style): (String, Style) = match entry {
+                            crate::git::staging_panel::StagingEntry::File(s) => {
+                                let prefix = if s.staged { "+".to_string() } else { format!("{}", s.status) };
+                                let base = if is_selected {
+                                    Style::default().fg(theme.fg).bg(theme.palette_selection)
+                                } else {
+                                    Style::default().fg(theme.fg).bg(theme.bg)
+                                };
+                                (format!(" {} {}", prefix, s.path), base)
+                            }
+                            crate::git::staging_panel::StagingEntry::Hunk { ref hunk, .. } => {
+                                let header = hunk.header.trim().chars().take(40).collect::<String>();
+                                let base = if is_selected {
+                                    Style::default().fg(theme.comment).bg(theme.palette_selection)
+                                } else {
+                                    Style::default().fg(theme.comment).bg(theme.bg)
+                                };
+                                (format!("   @ {} {} {}", hunk.old_start, hunk.new_start, header), base)
+                            }
+                        };
+                        ListItem::new(Line::from(Span::styled(label, style)))
+                    }).collect();
+
+                    let stage_list = List::new(items)
+                        .block(
+                            Block::default()
+                                .title(" Staging ")
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme.border_active)),
+                        )
+                        .style(Style::default().bg(theme.bg));
+                    frame.render_widget(stage_list, staging_area);
                 }
             }
 

@@ -50,6 +50,10 @@ pub struct AppContext {
     pub cached_files: Vec<String>,
     pub cached_files_root: std::path::PathBuf,
     pub cached_files_stamp: std::time::Instant,
+    pub git_manager: crate::git::GitManager,
+    pub staging_panel: crate::git::StagingPanel,
+    pub show_blame: bool,
+    pub git_branch: Option<String>,
 }
 
 impl AppContext {
@@ -119,6 +123,10 @@ impl AppContext {
             cached_files: Vec::new(),
             cached_files_root: root.clone(),
             cached_files_stamp: std::time::Instant::now(),
+            git_manager: crate::git::GitManager::new(),
+            staging_panel: crate::git::StagingPanel::new(),
+            show_blame: false,
+            git_branch: None,
         }
     }
 
@@ -935,6 +943,78 @@ impl AppContext {
             Action::SplitHorizontal => {}
             Action::SplitVertical => {}
             Action::ClosePane => {}
+            Action::GitBlameToggle => {
+                self.show_blame = !self.show_blame;
+                if self.show_blame {
+                    if let Some(buf) = self.buffers.get(self.active_buffer) {
+                        if let Some(ref path) = buf.path {
+                            self.git_manager.get_blame(path);
+                        }
+                    }
+                }
+            }
+            Action::GitStatus => {
+                self.staging_panel.toggle();
+                if self.staging_panel.visible {
+                    self.layout.show_staging_panel = true;
+                    if let Some(buf) = self.buffers.get(self.active_buffer) {
+                        if let Some(ref path) = buf.path {
+                            self.staging_panel.refresh(&mut self.git_manager, path);
+                        }
+                    }
+                } else {
+                    self.layout.show_staging_panel = false;
+                }
+            }
+            Action::GitStageFile => {
+                if let Some(buf) = self.buffers.get(self.active_buffer) {
+                    if let Some(ref path) = buf.path {
+                        if let Some(repo_path) = self.git_manager.discover_repo(path) {
+                            let relative = path.strip_prefix(&repo_path).unwrap_or(path);
+                            if let Err(e) = self.git_manager.stage_file(path, &relative.to_string_lossy()) {
+                                self.push_error(format!("Stage failed: {}", e));
+                            } else {
+                                self.push_success("File staged");
+                            }
+                        }
+                    }
+                }
+            }
+            Action::GitUnstageFile => {
+                if let Some(buf) = self.buffers.get(self.active_buffer) {
+                    if let Some(ref path) = buf.path {
+                        if let Some(repo_path) = self.git_manager.discover_repo(path) {
+                            let relative = path.strip_prefix(&repo_path).unwrap_or(path);
+                            if let Err(e) = self.git_manager.unstage_file(path, &relative.to_string_lossy()) {
+                                self.push_error(format!("Unstage failed: {}", e));
+                            } else {
+                                self.push_success("File unstaged");
+                            }
+                        }
+                    }
+                }
+            }
+            Action::GitStageHunk => {}
+            Action::GitUnstageHunk => {}
+            Action::GitStageAll => {
+                if let Some(buf) = self.buffers.get(self.active_buffer) {
+                    if let Some(ref path) = buf.path.clone() {
+                        if let Some(_repo_path) = self.git_manager.discover_repo(&path) {
+                            let status = self.git_manager.get_status(&path).cloned();
+                            if let Some(s) = status {
+                                for entry in &s.entries {
+                                    let _ = self.git_manager.stage_file(&path, &entry.path);
+                                }
+                                self.push_success("All changes staged");
+                            }
+                        }
+                    }
+                }
+            }
+            Action::GitCommit => {
+                self.push_info(":commit not yet implemented");
+            }
+            Action::GitDiff => {}
             Action::ExecuteCommand(cmd) => {
                 let lower = cmd.to_lowercase();
                 match lower.as_str() {
@@ -1023,8 +1103,14 @@ impl AppContext {
                     "vsplit" | "vs" => {
                         self.handle_action(&Action::SplitVertical).ok();
                     }
+                    "blame" => {
+                        self.handle_action(&Action::GitBlameToggle).ok();
+                    }
+                    "status" | "st" => {
+                        self.handle_action(&Action::GitStatus).ok();
+                    }
                     "help" => {
-                        self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, Ctrl+P find file, :help help");
+                        self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, Ctrl+P find file, :blame, :status, :help help");
                     }
                     "new" => {
                         let id = self.buffers.len();

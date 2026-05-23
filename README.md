@@ -197,6 +197,13 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | `Ctrl+p` | Fuzzy file finder |
 | `Ctrl+Shift+P` | Command palette |
 | `Ctrl+t` / `F1` | Toggle file tree |
+| `g b` | Toggle inline git blame |
+| `g s` | Toggle staging panel |
+| `:blame` | Toggle inline git blame |
+| `:status` / `:st` | Toggle staging panel |
+| `:stage` | Stage current buffer |
+| `:unstage` | Unstage current buffer |
+| `:stageall` | Stage all files |
 | `Ctrl+k` / `F11` | Toggle help preview |
 
 ---
@@ -252,7 +259,57 @@ show_commandbar = true
 
 ---
 
-### Architecture
+---
+
+### Git integration
+
+tFlow includes two optional Git features toggled on demand (zero UI impact when hidden):
+
+#### Inline blame (`:blame` / `g b`)
+
+Press `:blame` or `g b` (g then b in normal mode) to show author and time-ago for each line in the current buffer.
+
+```
+1  simangka 3d  let x = 42;
+2  simangka 3d  fn hello() {
+3  jdoe     12h    return "hi";
+4  jdoe     12h  }
+```
+
+Press `:blame` or `g b` again to hide the blame gutter.
+
+#### Staging panel (`:status` / `g s`)
+
+Press `:status` (or `:st`) or `g s` to open a right-side panel showing changed files:
+
+| Symbol | Meaning |
+|--------|---------|
+| `?` | Untracked (new file on disk, unknown to git) |
+| `m` | Modified (working copy differs from index) |
+| `+` | Staged (added to index, ready to commit) |
+
+Inside the panel:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move selection up |
+| `↓` / `j` | Move selection down |
+| `Enter` | Stage / unstage selected file |
+| `Space` | Expand / collapse hunks (diff preview) |
+| `Esc` / `Tab` | Close panel |
+
+Workflow:
+
+1. Edit a file in a git repository
+2. `:status` to see what changed
+3. `↓` to select a file, `Enter` to stage it (`m` → `+`)
+4. Select another file, `Enter` to stage it
+5. Press `Esc` to close the panel
+6. Run `git commit -m "message"` in your terminal to commit
+
+To unstage, open the panel, select a `+` file, and press `Enter` again.
+
+## Architecture
 
 ```
 src/
@@ -288,7 +345,7 @@ Upcoming features planned:
 | Bookmarks (m' / ') | 🔜 Planned |
 | Integrated PTY terminal | 🔜 Planned |
 | LSP integration (completions, diagnostics, go-to-def) | 🔜 Planned |
-| Git integration (inline blame, hunk staging) | 🔜 Planned |
+| Git integration (inline blame, staging panel) | ✅ Done |
 | Live markdown preview | 🔜 Planned |
 | Diagnostics gutter | 🔜 Planned |
 

@@ -225,6 +225,14 @@ impl KeyMap {
         add(&mut km, alt_char('q'), Action::ClosePane, none);
         add(&mut km, alt_char('m'), Action::FocusPreview, none);
 
+        // Git keybindings (g leader + key)
+        add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('b'), Action::GitBlameToggle, normal);
+        add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('s'), Action::GitStatus, normal);
+        add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('a'), Action::GitStageFile, normal);
+        add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('u'), Action::GitUnstageFile, normal);
+        add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('c'), Action::GitCommit, normal);
+        add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('d'), Action::GitDiff, normal);
+
         km
     }
 

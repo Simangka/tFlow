@@ -9,12 +9,9 @@ pub struct UILayout {
     pub show_palette: bool,
     pub show_search_panel: bool,
     pub show_notifications: bool,
-    pub split_direction: SplitDirection,
-    pub split_ratio: f64,
-    pub filetree_width: u16,
-    pub preview_width_ratio: f64,
-    pub preview_as_markdown: bool,
+    pub show_staging_panel: bool,
     pub focused_pane: FocusedPane,
+    pub split_direction: SplitDirection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +37,7 @@ pub struct LayoutResult {
     pub palette: Option<Rect>,
     pub search_panel: Option<Rect>,
     pub notifications: Option<Rect>,
+    pub staging_panel: Option<Rect>,
 }
 
 impl UILayout {
@@ -51,12 +49,9 @@ impl UILayout {
             show_markdown_preview: false,
             show_palette: false,
             show_search_panel: false,
-            show_notifications: true,
-            split_direction: SplitDirection::Horizontal,
-            split_ratio: 0.55,
-            filetree_width: 28,
-            preview_width_ratio: 0.45,
-            preview_as_markdown: false,
+			show_notifications: true,
+			show_staging_panel: false,
+			split_direction: SplitDirection::Horizontal,
             focused_pane: FocusedPane::Editor,
         }
     }
@@ -134,6 +129,17 @@ impl UILayout {
             (remaining, None, None)
         };
 
+        let (editor, staging_panel) = if self.show_staging_panel {
+            let staging_width = 36u16.min(editor.width.saturating_sub(10));
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(1), Constraint::Length(staging_width)])
+                .split(editor);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (editor, None)
+        };
+
         let gutter = Rect::new(editor.x, editor.y, 0, editor.height);
 
         LayoutResult {
@@ -146,57 +152,48 @@ impl UILayout {
             palette,
             search_panel: search_result_area,
             notifications,
+            staging_panel,
         }
     }
 
     fn layout_double_split(&self, area: Rect, filetree_first: bool) -> (Rect, Option<Rect>, Option<Rect>) {
+        let ft_w = 28u16;
+        let preview_w = (area.width as f64 * 0.45) as u16;
         match self.split_direction {
             SplitDirection::Horizontal => {
                 if filetree_first {
-                    let filetree_width = self.filetree_width.min(area.width.saturating_sub(4));
-                    let editor_width = area.width.saturating_sub(filetree_width);
+                    let fw = ft_w.min(area.width.saturating_sub(4));
+                    let ew = area.width.saturating_sub(fw);
                     let chunks = Layout::default()
                         .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Length(filetree_width),
-                            Constraint::Min(editor_width),
-                        ])
+                        .constraints([Constraint::Length(fw), Constraint::Min(ew)])
                         .split(area);
                     (chunks[1], Some(chunks[0]), None)
                 } else {
-                    let preview_width = (area.width as f64 * self.preview_width_ratio) as u16;
-                    let editor_width = area.width.saturating_sub(preview_width);
+                    let pw = preview_w.min(area.width.saturating_sub(4));
+                    let ew = area.width.saturating_sub(pw);
                     let chunks = Layout::default()
                         .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Min(editor_width),
-                            Constraint::Length(preview_width),
-                        ])
+                        .constraints([Constraint::Min(ew), Constraint::Length(pw)])
                         .split(area);
                     (chunks[0], None, Some(chunks[1]))
                 }
             }
             SplitDirection::Vertical => {
                 if filetree_first {
-                    let filetree_height = 12.min(area.height.saturating_sub(4));
-                    let editor_height = area.height.saturating_sub(filetree_height);
+                    let fh = 12.min(area.height.saturating_sub(4));
+                    let eh = area.height.saturating_sub(fh);
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(filetree_height),
-                            Constraint::Min(editor_height),
-                        ])
+                        .constraints([Constraint::Length(fh), Constraint::Min(eh)])
                         .split(area);
                     (chunks[1], Some(chunks[0]), None)
                 } else {
-                    let preview_height = (area.height as f64 * self.preview_width_ratio) as u16;
-                    let editor_height = area.height.saturating_sub(preview_height);
+                    let ph = preview_w.min(area.height.saturating_sub(4));
+                    let eh = area.height.saturating_sub(ph);
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Min(editor_height),
-                            Constraint::Length(preview_height),
-                        ])
+                        .constraints([Constraint::Min(eh), Constraint::Length(ph)])
                         .split(area);
                     (chunks[0], None, Some(chunks[1]))
                 }
@@ -205,35 +202,34 @@ impl UILayout {
     }
 
     fn layout_triple_split(&self, area: Rect) -> (Rect, Option<Rect>, Option<Rect>) {
+        let ft_w = 28u16;
         match self.split_direction {
             SplitDirection::Horizontal => {
-                let filetree_width = self.filetree_width.min(area.width.saturating_sub(6));
-                let remaining_width = area.width.saturating_sub(filetree_width);
-                let preview_width = ((remaining_width as f64) * self.preview_width_ratio) as u16;
-                let editor_width = remaining_width.saturating_sub(preview_width);
-
+                let fw = ft_w.min(area.width.saturating_sub(6));
+                let rw = area.width.saturating_sub(fw);
+                let pw = ((rw as f64) * 0.45) as u16;
+                let ew = rw.saturating_sub(pw);
                 let chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([
-                        Constraint::Length(filetree_width),
-                        Constraint::Min(editor_width.max(10)),
-                        Constraint::Length(preview_width.max(10)),
+                        Constraint::Length(fw),
+                        Constraint::Min(ew.max(10)),
+                        Constraint::Length(pw.max(10)),
                     ])
                     .split(area);
                 (chunks[1], Some(chunks[0]), Some(chunks[2]))
             }
             SplitDirection::Vertical => {
-                let filetree_height = 12.min(area.height.saturating_sub(6));
-                let remaining_height = area.height.saturating_sub(filetree_height);
-                let preview_height = ((remaining_height as f64) * self.preview_width_ratio) as u16;
-                let editor_height = remaining_height.saturating_sub(preview_height);
-
+                let fh = 12.min(area.height.saturating_sub(6));
+                let rh = area.height.saturating_sub(fh);
+                let ph = ((rh as f64) * 0.45) as u16;
+                let eh = rh.saturating_sub(ph);
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(filetree_height),
-                        Constraint::Min(editor_height.max(3)),
-                        Constraint::Length(preview_height.max(3)),
+                        Constraint::Length(fh),
+                        Constraint::Min(eh.max(3)),
+                        Constraint::Length(ph.max(3)),
                     ])
                     .split(area);
                 (chunks[1], Some(chunks[0]), Some(chunks[2]))

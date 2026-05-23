@@ -165,6 +165,16 @@ pub enum Action {
     SearchForwardRegex,
     SearchBackwardRegex,
 
+    GitBlameToggle,
+    GitStatus,
+    GitStageFile,
+    GitUnstageFile,
+    GitStageHunk,
+    GitUnstageHunk,
+    GitStageAll,
+    GitCommit,
+    GitDiff,
+
     Noop,
     NoOp,
 }
@@ -300,6 +310,15 @@ impl Action {
             Action::DebugInfo => "Show debug information",
             Action::ReloadConfig => "Reload configuration",
             Action::MoveToLine(_) => "Move to specific line",
+            Action::GitBlameToggle => "Toggle git blame gutter",
+            Action::GitStatus => "Toggle git status panel",
+            Action::GitStageFile => "Stage current file",
+            Action::GitUnstageFile => "Unstage current file",
+            Action::GitStageHunk => "Stage selected hunk",
+            Action::GitUnstageHunk => "Unstage selected hunk",
+            Action::GitStageAll => "Stage all changes",
+            Action::GitCommit => "Git commit",
+            Action::GitDiff => "Show git diff",
             Action::Noop | Action::NoOp => "No operation",
         }
     }
@@ -377,6 +396,11 @@ impl Action {
             Action::SelectAll | Action::SelectLine | Action::SelectToMatchingBrace
             | Action::ExpandSelection | Action::ShrinkSelection => ActionCategory::Selection,
 
+            Action::GitBlameToggle | Action::GitStatus
+            | Action::GitStageFile | Action::GitUnstageFile
+            | Action::GitStageHunk | Action::GitUnstageHunk
+            | Action::GitStageAll | Action::GitCommit | Action::GitDiff => ActionCategory::Git,
+
             Action::Noop | Action::NoOp | Action::Quit | Action::ForceQuit => ActionCategory::Application,
         }
     }
@@ -420,6 +444,7 @@ pub enum ActionCategory {
     Markdown,
     Workspace,
     UI,
+    Git,
     Application,
     Custom,
 }

@@ -63,6 +63,7 @@ impl RenderEngine {
         relative_numbers: bool,
         syntax_ext: Option<&str>,
         search_state: &SearchState,
+        blame_data: Option<&[Option<crate::git::BlameInfo>]>,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -78,10 +79,13 @@ impl RenderEngine {
         } else {
             0
         };
+        let blame_width = if let Some(bd) = blame_data {
+            if !bd.is_empty() { crate::rendering::blame_gutter::compute_width(bd) } else { 0 }
+        } else { 0 };
         let text_area = Rect::new(
-            area.x + gutter_width_val,
+            area.x + gutter_width_val + blame_width,
             area.y,
-            area.width.saturating_sub(gutter_width_val),
+            area.width.saturating_sub(gutter_width_val + blame_width),
             area.height,
         );
 
@@ -106,6 +110,23 @@ impl RenderEngine {
                 relative_numbers,
                 visible_start + 1,
             );
+        }
+
+        if blame_width > 0 {
+            if let Some(bd) = blame_data {
+                let blame_area = Rect::new(
+                    area.x + gutter_width_val,
+                    area.y,
+                    blame_width,
+                    area.height,
+                );
+                let visible_blame: Vec<Option<crate::git::BlameInfo>> = bd.iter()
+                    .skip(visible_start)
+                    .take(area.height as usize)
+                    .cloned()
+                    .collect();
+                crate::rendering::blame_gutter::render(frame, blame_area, &visible_blame, visible_start, theme);
+            }
         }
 
         let col_offset = self.scroll_offset.column;
