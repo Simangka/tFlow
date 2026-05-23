@@ -167,6 +167,7 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | `:vs` / `:vsplit` | Vertical split with current buffer |
 | `:vs <file>` / `:vsplit <file>` | Open file in vertical split |
 | `:close` | Close current split pane |
+| `:branch` / `:br` / `:branches` | Toggle branch log viewer |
 | `:help` | Show help screen |
 
 #### File tree (`F1` / `Ctrl+T`)
@@ -199,8 +200,10 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | `Ctrl+t` / `F1` | Toggle file tree |
 | `g b` | Toggle inline git blame |
 | `g s` | Toggle staging panel |
+| `g r` | Toggle branch log viewer |
 | `:blame` | Toggle inline git blame |
 | `:status` / `:st` | Toggle staging panel |
+| `:branch` / `:br` / `:branches` | Toggle branch log viewer |
 | `:stage` | Stage current buffer |
 | `:unstage` | Unstage current buffer |
 | `:stageall` | Stage all files |
@@ -309,6 +312,39 @@ Workflow:
 
 To unstage, open the panel, select a `+` file, and press `Enter` again.
 
+#### Branch log viewer (`:branch` / `g r`)
+
+Press `:branch` (or `:br` / `:branches`) or `g r` to open a right-side panel showing the git commit graph:
+
+```
+● 3b845e6 (master) feat: git integration (inline blame, staging panel) + README docs
+│
+● ee77e29 docs: add save-as to README
+│
+● e671371 fix: refresh file tree after save so new files appear immediately
+```
+
+Inside the panel:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move selection up |
+| `↓` / `j` | Move selection down |
+| `Esc` / `Tab` | Close panel |
+| `Enter` | Switch to the selected branch (via checkout) |
+
+The graph visualises branching and merging with Unicode line-drawing characters:
+- `●` — regular commit, `○` — merge commit
+- `│` — continuing branch line
+- `├` / `┤` — branch fork / merge
+- `└` / `┘` — branch end
+- `╱` / `╲` — lane transitions
+- Coloured dots and lines for different branches (not yet implemented)
+
+> **Note:** The branch graph is an early implementation. It works for linear and simple branching histories. Complex histories with multiple active branches may show visual artifacts. Improvements are planned (see TODO).
+
+---
+
 ## Architecture
 
 ```
@@ -346,8 +382,19 @@ Upcoming features planned:
 | Integrated PTY terminal | 🔜 Planned |
 | LSP integration (completions, diagnostics, go-to-def) | 🔜 Planned |
 | Git integration (inline blame, staging panel) | ✅ Done |
+| **Branch graph log (`:branch` / `g r`)** | ⚠️ **Needs more work** |
 | Live markdown preview | 🔜 Planned |
 | Diagnostics gutter | 🔜 Planned |
+
+> **⚠️ Branch graph — needs more work:**
+> The commit graph renderer is a first pass and has known limitations:
+> - Only tested on linear / single-branch histories
+> - Multi-branch layouts may produce overlapping lines
+> - No colour-coding for different branches yet
+> - Connector rows can appear at the end of the graph
+> - Performance not yet optimised for large repos with thousands of commits
+>
+> Contributions and improvements welcome.
 
 ---
 

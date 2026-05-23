@@ -10,6 +10,7 @@ pub struct UILayout {
     pub show_search_panel: bool,
     pub show_notifications: bool,
     pub show_staging_panel: bool,
+    pub show_branch_view: bool,
     pub focused_pane: FocusedPane,
     pub split_direction: SplitDirection,
 }
@@ -38,6 +39,7 @@ pub struct LayoutResult {
     pub search_panel: Option<Rect>,
     pub notifications: Option<Rect>,
     pub staging_panel: Option<Rect>,
+    pub branch_view: Option<Rect>,
 }
 
 impl UILayout {
@@ -51,6 +53,7 @@ impl UILayout {
             show_search_panel: false,
 			show_notifications: true,
 			show_staging_panel: false,
+			show_branch_view: false,
 			split_direction: SplitDirection::Horizontal,
             focused_pane: FocusedPane::Editor,
         }
@@ -140,6 +143,17 @@ impl UILayout {
             (editor, None)
         };
 
+        let (editor, branch_view) = if self.show_branch_view {
+            let bw_width = (editor.width / 2).clamp(40, 80);
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(1), Constraint::Length(bw_width)])
+                .split(editor);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (editor, None)
+        };
+
         let gutter = Rect::new(editor.x, editor.y, 0, editor.height);
 
         LayoutResult {
@@ -153,6 +167,7 @@ impl UILayout {
             search_panel: search_result_area,
             notifications,
             staging_panel,
+            branch_view,
         }
     }
 

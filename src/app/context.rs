@@ -52,6 +52,7 @@ pub struct AppContext {
     pub cached_files_stamp: std::time::Instant,
     pub git_manager: crate::git::GitManager,
     pub staging_panel: crate::git::StagingPanel,
+    pub branch_view: crate::git::BranchViewPanel,
     pub show_blame: bool,
     pub git_branch: Option<String>,
 }
@@ -125,6 +126,7 @@ impl AppContext {
             cached_files_stamp: std::time::Instant::now(),
             git_manager: crate::git::GitManager::new(),
             staging_panel: crate::git::StagingPanel::new(),
+            branch_view: crate::git::BranchViewPanel::new(),
             show_blame: false,
             git_branch: None,
         }
@@ -966,6 +968,28 @@ impl AppContext {
                     self.layout.show_staging_panel = false;
                 }
             }
+            Action::GitBranchView => {
+                self.branch_view.toggle();
+                if self.branch_view.visible {
+                    if let Some(buf) = self.buffers.get(self.active_buffer) {
+                        if let Some(ref path) = buf.path {
+                            if let Some(repo_path) = self.git_manager.discover_repo(path) {
+                                self.branch_view.refresh(repo_path);
+                            } else {
+                                self.push_error("No git repository found");
+                                self.branch_view.visible = false;
+                                return Ok(());
+                            }
+                        } else {
+                            self.push_error("No file path for current buffer");
+                            self.branch_view.visible = false;
+                            return Ok(());
+                        }
+                    }
+                }
+                self.layout.show_branch_view = self.branch_view.visible;
+                self.layout.show_staging_panel = false;
+            }
             Action::GitStageFile => {
                 if let Some(buf) = self.buffers.get(self.active_buffer) {
                     if let Some(ref path) = buf.path {
@@ -1109,8 +1133,11 @@ impl AppContext {
                     "status" | "st" => {
                         self.handle_action(&Action::GitStatus).ok();
                     }
+                    "branch" | "branches" | "br" => {
+                        self.handle_action(&Action::GitBranchView).ok();
+                    }
                     "help" => {
-                        self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, Ctrl+P find file, :blame, :status, :help help");
+                        self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, :blame, :status, :branch, Ctrl+P find file, :help help");
                     }
                     "new" => {
                         let id = self.buffers.len();

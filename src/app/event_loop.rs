@@ -143,6 +143,49 @@ impl EventLoop {
             }
         }
 
+        if ctx.branch_view.visible && ctx.layout.focused_pane != crate::ui::layout::FocusedPane::FileTree {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    ctx.branch_view.select_prev();
+                    return Ok(());
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    ctx.branch_view.select_next();
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    let branch_opt = ctx.branch_view.selected_branch();
+                    let rp_opt = ctx.branch_view.repo_path.clone();
+                    if let Some(b) = branch_opt {
+                        let file_path = ctx.buffers.get(ctx.active_buffer).and_then(|b| b.path.clone());
+                        if let Some(fp) = file_path {
+                            match ctx.git_manager.checkout_branch(&fp, &b) {
+                                Ok(msg) => {
+                                    ctx.push_success(msg);
+                                    if let Some(buf) = ctx.buffers.get_mut(ctx.active_buffer) {
+                                        if !buf.dirty {
+                                            let _ = buf.load();
+                                        }
+                                    }
+                                    if let Some(rp) = rp_opt {
+                                        ctx.branch_view.refresh(rp);
+                                    }
+                                }
+                                Err(e) => ctx.push_error(e),
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                KeyCode::Esc | KeyCode::Tab => {
+                    ctx.branch_view.visible = false;
+                    ctx.layout.show_branch_view = false;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         if ctx.staging_panel.visible && ctx.layout.focused_pane != crate::ui::layout::FocusedPane::FileTree {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -660,6 +703,34 @@ impl EventLoop {
                         )
                         .style(Style::default().bg(theme.bg));
                     frame.render_widget(stage_list, staging_area);
+                }
+            }
+
+            if ctx.branch_view.visible {
+                if let Some(bv_area) = layout.branch_view {
+                    frame.render_widget(Clear, bv_area);
+
+                    let items: Vec<ListItem> = ctx.branch_view.data.iter().enumerate().map(|(i, entry)| {
+                        let is_selected = i == ctx.branch_view.selected;
+                        let style = if is_selected {
+                            Style::default().fg(theme.fg).bg(theme.palette_selection)
+                        } else if entry.is_head {
+                            Style::default().fg(theme.keyword).bg(theme.bg)
+                        } else {
+                            Style::default().fg(theme.fg).bg(theme.bg)
+                        };
+                        ListItem::new(Line::from(Span::styled(&entry.text, style)))
+                    }).collect();
+
+                    let list = List::new(items)
+                        .block(
+                            Block::default()
+                                .title(" Branches ")
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme.border_active)),
+                        )
+                        .style(Style::default().bg(theme.bg));
+                    frame.render_widget(list, bv_area);
                 }
             }
 

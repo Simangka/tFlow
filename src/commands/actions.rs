@@ -167,6 +167,7 @@ pub enum Action {
 
     GitBlameToggle,
     GitStatus,
+    GitBranchView,
     GitStageFile,
     GitUnstageFile,
     GitStageHunk,
@@ -312,6 +313,7 @@ impl Action {
             Action::MoveToLine(_) => "Move to specific line",
             Action::GitBlameToggle => "Toggle git blame gutter",
             Action::GitStatus => "Toggle git status panel",
+            Action::GitBranchView => "Toggle git branch viewer",
             Action::GitStageFile => "Stage current file",
             Action::GitUnstageFile => "Unstage current file",
             Action::GitStageHunk => "Stage selected hunk",
@@ -396,7 +398,7 @@ impl Action {
             Action::SelectAll | Action::SelectLine | Action::SelectToMatchingBrace
             | Action::ExpandSelection | Action::ShrinkSelection => ActionCategory::Selection,
 
-            Action::GitBlameToggle | Action::GitStatus
+            Action::GitBlameToggle | Action::GitStatus | Action::GitBranchView
             | Action::GitStageFile | Action::GitUnstageFile
             | Action::GitStageHunk | Action::GitUnstageHunk
             | Action::GitStageAll | Action::GitCommit | Action::GitDiff => ActionCategory::Git,

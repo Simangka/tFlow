@@ -110,4 +110,17 @@ impl GitManager {
         self.statuses.clear();
         Ok(())
     }
+
+    pub fn checkout_branch(&mut self, file_path: &Path, branch: &str) -> Result<String, String> {
+        let repo_path = self.discover_repo(file_path).ok_or("No git repo")?;
+        let refname = format!("refs/heads/{}", branch);
+        let repo = self.repos.get(&repo_path).ok_or("Repo not found")?;
+        repo.set_head(&refname).map_err(|e| format!("{}", e))?;
+        let mut opts = git2::build::CheckoutBuilder::new();
+        repo.checkout_head(Some(&mut opts)).map_err(|e| format!("{}", e))?;
+        self.branches.insert(repo_path, branch.to_string());
+        self.statuses.clear();
+        self.blames.clear();
+        Ok(format!("Switched to branch '{}'", branch))
+    }
 }
