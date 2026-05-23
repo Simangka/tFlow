@@ -18,6 +18,7 @@ use crate::async_tasks::task_queue::TaskQueue;
 use crate::rendering::engine::RenderEngine;
 use crate::ui::UILayout;
 use crate::ui::split::SplitManager;
+use crate::terminal::TerminalPanel;
 
 pub struct AppContext {
     pub buffers: Vec<Buffer>,
@@ -53,6 +54,7 @@ pub struct AppContext {
     pub git_manager: crate::git::GitManager,
     pub staging_panel: crate::git::StagingPanel,
     pub branch_view: crate::git::BranchViewPanel,
+    pub terminal_panel: TerminalPanel,
     pub show_blame: bool,
     pub git_branch: Option<String>,
 }
@@ -102,6 +104,17 @@ impl AppContext {
             histories,
             keymap: KeyMap::new_with_defaults(),
             registry: CommandRegistry::new(),
+            terminal_panel: {
+                let mut tp = TerminalPanel::new();
+                tp.position = match config.terminal.position.as_str() {
+                    "top" => crate::terminal::TerminalPosition::Top,
+                    "right" => crate::terminal::TerminalPosition::Right,
+                    _ => crate::terminal::TerminalPosition::Bottom,
+                };
+                tp.height = config.terminal.height;
+                tp.width = config.terminal.width;
+                tp
+            },
             config,
             theme,
             notifications: Vec::new(),
@@ -1039,6 +1052,67 @@ impl AppContext {
                 self.push_info(":commit not yet implemented");
             }
             Action::GitDiff => {}
+            Action::ToggleTerminal => {
+                self.terminal_panel.toggle();
+                self.layout.show_terminal = self.terminal_panel.visible;
+                self.layout.terminal_position = self.terminal_panel.position.clone();
+                self.layout.terminal_height = self.terminal_panel.height;
+                self.layout.terminal_width = self.terminal_panel.width;
+                if self.terminal_panel.visible {
+                    self.layout.focused_pane = crate::ui::layout::FocusedPane::Terminal;
+                    self.terminal_panel.focus();
+                } else {
+                    self.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                }
+                self.layout.show_staging_panel = false;
+                self.layout.show_branch_view = false;
+            }
+            Action::FocusTerminal => {
+                if !self.terminal_panel.visible {
+                    self.terminal_panel.toggle();
+                    self.layout.show_terminal = true;
+                }
+                self.layout.focused_pane = crate::ui::layout::FocusedPane::Terminal;
+                self.terminal_panel.focus();
+            }
+            Action::TerminalNextTab => {
+                self.terminal_panel.next_instance();
+            }
+            Action::TerminalPrevTab => {
+                self.terminal_panel.prev_instance();
+            }
+            Action::TerminalNewTab => {
+                if !self.terminal_panel.visible {
+                    self.terminal_panel.toggle();
+                    self.layout.show_terminal = true;
+                }
+                self.terminal_panel.spawn("cmd.exe", "cmd");
+                self.layout.focused_pane = crate::ui::layout::FocusedPane::Terminal;
+                self.terminal_panel.focus();
+            }
+            Action::TerminalCloseTab => {
+                self.terminal_panel.close_active();
+                self.layout.show_terminal = self.terminal_panel.visible;
+                if !self.terminal_panel.visible {
+                    self.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                }
+            }
+            Action::TerminalScrollUp => {
+                self.terminal_panel.scroll_up();
+            }
+            Action::TerminalScrollDown => {
+                self.terminal_panel.scroll_down();
+            }
+            Action::TerminalCyclePosition => {
+                self.terminal_panel.cycle_position();
+                self.layout.terminal_position = self.terminal_panel.position.clone();
+                if !self.terminal_panel.visible {
+                    self.terminal_panel.toggle();
+                    self.layout.show_terminal = true;
+                }
+                self.layout.focused_pane = crate::ui::layout::FocusedPane::Terminal;
+                self.terminal_panel.focus();
+            }
             Action::ExecuteCommand(cmd) => {
                 let lower = cmd.to_lowercase();
                 match lower.as_str() {
@@ -1136,8 +1210,22 @@ impl AppContext {
                     "branch" | "branches" | "br" => {
                         self.handle_action(&Action::GitBranchView).ok();
                     }
+                    "terminal" | "term" | "t" => {
+                        self.handle_action(&Action::ToggleTerminal).ok();
+                    }
+                    s if s.starts_with("terminal ") || s.starts_with("term ") => {
+                        let shell = s.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                        if !shell.is_empty() {
+                            self.terminal_panel.spawn(shell, shell);
+                            self.layout.show_terminal = true;
+                            self.layout.focused_pane = crate::ui::layout::FocusedPane::Terminal;
+                            self.terminal_panel.focus();
+                        } else {
+                            self.handle_action(&Action::ToggleTerminal).ok();
+                        }
+                    }
                     "help" => {
-                        self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, :blame, :status, :branch, Ctrl+P find file, :help help");
+                        self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, :blame, :status, :branch, :terminal, Ctrl+P find file, :help help");
                     }
                     "new" => {
                         let id = self.buffers.len();

@@ -81,6 +81,23 @@ impl Default for MarkdownConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct TerminalConfig {
+    pub position: String,
+    pub height: u16,
+    pub width: u16,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            position: "bottom".to_string(),
+            height: 12,
+            width: 40,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub theme: String,
     pub line_numbers: LineNumbersConfig,
@@ -88,6 +105,7 @@ pub struct Config {
     pub workspace: WorkspaceConfig,
     pub keymap: KeymapConfig,
     pub markdown: MarkdownConfig,
+    pub terminal: TerminalConfig,
     pub readonly: bool,
     pub verbose: bool,
     pub log_file: Option<PathBuf>,
@@ -107,6 +125,7 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             keymap: KeymapConfig::default(),
             markdown: MarkdownConfig::default(),
+            terminal: TerminalConfig::default(),
             readonly: false,
             verbose: false,
             log_file: None,

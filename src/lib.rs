@@ -12,3 +12,4 @@ pub mod workspace;
 pub mod plugins;
 pub mod async_tasks;
 pub mod git;
+pub mod terminal;

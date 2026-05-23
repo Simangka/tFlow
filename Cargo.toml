@@ -43,6 +43,7 @@ nu-ansi-term = "0.50"
 atty = "0.2"
 walkdir = "2"
 git2 = "0.18"
+portable-pty = "0.8"
 
 [profile.release]
 opt-level = 3

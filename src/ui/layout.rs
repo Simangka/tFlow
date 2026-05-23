@@ -1,4 +1,5 @@
 use ratatui::layout::{Layout, Constraint, Direction, Rect};
+use crate::terminal::TerminalPosition;
 
 #[derive(Debug, Clone)]
 pub struct UILayout {
@@ -11,6 +12,10 @@ pub struct UILayout {
     pub show_notifications: bool,
     pub show_staging_panel: bool,
     pub show_branch_view: bool,
+    pub show_terminal: bool,
+    pub terminal_position: TerminalPosition,
+    pub terminal_height: u16,
+    pub terminal_width: u16,
     pub focused_pane: FocusedPane,
     pub split_direction: SplitDirection,
 }
@@ -25,6 +30,7 @@ pub enum SplitDirection {
 pub enum FocusedPane {
     Editor,
     FileTree,
+    Terminal,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +46,7 @@ pub struct LayoutResult {
     pub notifications: Option<Rect>,
     pub staging_panel: Option<Rect>,
     pub branch_view: Option<Rect>,
+    pub terminal: Option<Rect>,
 }
 
 impl UILayout {
@@ -54,6 +61,10 @@ impl UILayout {
 			show_notifications: true,
 			show_staging_panel: false,
 			show_branch_view: false,
+			show_terminal: false,
+			terminal_position: TerminalPosition::Bottom,
+			terminal_height: 12,
+			terminal_width: 40,
 			split_direction: SplitDirection::Horizontal,
             focused_pane: FocusedPane::Editor,
         }
@@ -132,6 +143,38 @@ impl UILayout {
             (remaining, None, None)
         };
 
+        // Terminal panel (stripped from editor area before staging/branch_view)
+        let (editor, terminal) = if self.show_terminal {
+            match self.terminal_position {
+                TerminalPosition::Bottom => {
+                    let h = self.terminal_height.min(editor.height.saturating_sub(5));
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Min(1), Constraint::Length(h)])
+                        .split(editor);
+                    (chunks[0], Some(chunks[1]))
+                }
+                TerminalPosition::Top => {
+                    let h = self.terminal_height.min(editor.height.saturating_sub(5));
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(h), Constraint::Min(1)])
+                        .split(editor);
+                    (chunks[1], Some(chunks[0]))
+                }
+                TerminalPosition::Right => {
+                    let w = self.terminal_width.min(editor.width.saturating_sub(20));
+                    let chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Min(1), Constraint::Length(w)])
+                        .split(editor);
+                    (chunks[0], Some(chunks[1]))
+                }
+            }
+        } else {
+            (editor, None)
+        };
+
         let (editor, staging_panel) = if self.show_staging_panel {
             let staging_width = 36u16.min(editor.width.saturating_sub(10));
             let chunks = Layout::default()
@@ -168,6 +211,7 @@ impl UILayout {
             notifications,
             staging_panel,
             branch_view,
+            terminal,
         }
     }
 

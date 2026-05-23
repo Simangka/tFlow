@@ -201,9 +201,12 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | `g b` | Toggle inline git blame |
 | `g s` | Toggle staging panel |
 | `g r` | Toggle branch log viewer |
+| `F12` / `Alt+t` | Toggle integrated terminal |
+| `Ctrl+\` | Focus terminal |
 | `:blame` | Toggle inline git blame |
 | `:status` / `:st` | Toggle staging panel |
 | `:branch` / `:br` / `:branches` | Toggle branch log viewer |
+| `:terminal` / `:term` | Toggle integrated terminal |
 | `:stage` | Stage current buffer |
 | `:unstage` | Unstage current buffer |
 | `:stageall` | Stage all files |
@@ -366,6 +369,65 @@ src/
 
 ---
 
+## Integrated Terminal
+
+Press `F12` or `Alt+t` (or `:terminal` / `:term` in command mode) to open and close the integrated terminal panel at the bottom of the editor.
+
+```
+┌──────────────────────────────────────┐
+│  Editor                              │
+├──────────────────────────────────────┤
+│  cmd  powershell                     │
+│  C:\> opencode                       │
+│  C:\> claude                         │
+│  >_                                  │
+│  >  cmd | 80x12                      │
+└──────────────────────────────────────┘
+```
+
+### Features
+
+- **Full PTY support** — runs any CLI tool including AI agents (opencode, claude code, codex) with proper terminal emulation
+- **Multiple tabs** — switch between terminal instances with `Ctrl+Tab` / `Ctrl+Shift+Tab`
+- **Configurable position** — terminal can be placed at bottom, top, or right side (use `g t` to cycle positions)
+- **Scrollback** — `Shift+↑` / `Shift+↓` or `PageUp` / `PageDown` to scroll through output
+- **Tab management** — spawn new tabs with `:term powershell`, close with `Esc`
+- **Shell detection** — defaults to `cmd.exe` on Windows, `bash` on Unix
+- **Theme-aware** — uses your current tFlow theme colors
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `F12` / `Alt+t` | Toggle terminal |
+| `Ctrl+\` | Focus terminal |
+| `Esc` | Unfocus terminal (return to editor) |
+| `Ctrl+Tab` | Next terminal tab |
+| `Ctrl+Shift+Tab` | Previous terminal tab |
+| `Shift+↑` / `PageUp` | Scroll up |
+| `Shift+↓` / `PageDown` | Scroll down |
+| `g t` | Cycle terminal position (bottom → right → top) |
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `:terminal` / `:term` | Toggle terminal |
+| `:term <shell>` | Open new terminal tab with specified shell |
+
+### Configuration
+
+Add to `~/.config/tflow/config.toml`:
+
+```toml
+[terminal]
+position = "bottom"    # "bottom", "top", or "right"
+height = 12            # terminal panel height in rows (for top/bottom)
+width = 40             # terminal panel width in columns (for right)
+```
+
+---
+
 ## Roadmap / TODO
 
 Upcoming features planned:
@@ -379,12 +441,22 @@ Upcoming features planned:
 | Multi-cursor (Ctrl+D) | 🔜 Planned |
 | Macro recording/playback | 🔜 Planned |
 | Bookmarks (m' / ') | 🔜 Planned |
-| Integrated PTY terminal | 🔜 Planned |
+| **Integrated terminal (F12 / :term)** | ⚠️ **Needs more work** |
 | LSP integration (completions, diagnostics, go-to-def) | 🔜 Planned |
 | Git integration (inline blame, staging panel) | ✅ Done |
 | **Branch graph log (`:branch` / `g r`)** | ⚠️ **Needs more work** |
 | Live markdown preview | 🔜 Planned |
 | Diagnostics gutter | 🔜 Planned |
+
+> **⚠️ Integrated terminal — needs more work:**
+> The terminal is a first pass with basic PTY support. Known limitations:
+> - No ANSI color parsing yet (displays raw escape sequences)
+> - No copy/paste support
+> - Terminal resize on window resize not yet implemented  
+> - No search in terminal scrollback
+> - Only tested on Windows (cmd.exe)
+>
+> Contributions and improvements welcome.
 
 > **⚠️ Branch graph — needs more work:**
 > The commit graph renderer is a first pass and has known limitations:

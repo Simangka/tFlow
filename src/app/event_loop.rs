@@ -7,6 +7,7 @@ use crate::core::Position;
 use crate::editor::cursor::Cursor;
 use crate::editor::selection::Selection;
 use crate::workspace::file_tree::TreeDisplayEntry;
+use crate::terminal::renderer::render_terminal_lines;
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph, List, ListItem, Clear, Wrap};
@@ -163,11 +164,11 @@ impl EventLoop {
                                 Ok(msg) => {
                                     ctx.push_success(msg);
                                     if let Some(buf) = ctx.buffers.get_mut(ctx.active_buffer) {
-                                        if !buf.dirty {
-                                            let _ = buf.load();
-                                        }
+                                    if !buf.dirty {
+                                        let _ = buf.load();
                                     }
-                                    if let Some(rp) = rp_opt {
+                                }
+                                if let Some(rp) = rp_opt {
                                         ctx.branch_view.refresh(rp);
                                     }
                                 }
@@ -238,6 +239,50 @@ impl EventLoop {
                     return Ok(());
                 }
                 _ => {}
+            }
+        }
+
+        if ctx.terminal_panel.visible && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal {
+            match key.code {
+                KeyCode::Esc => {
+                    ctx.terminal_panel.unfocus();
+                    ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                    return Ok(());
+                }
+                KeyCode::Tab if key.modifiers == KeyModifiers::CONTROL => {
+                    ctx.terminal_panel.next_instance();
+                    return Ok(());
+                }
+                KeyCode::BackTab => {
+                    ctx.terminal_panel.prev_instance();
+                    return Ok(());
+                }
+                KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
+                    ctx.terminal_panel.scroll_up();
+                    return Ok(());
+                }
+                KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
+                    ctx.terminal_panel.scroll_down();
+                    return Ok(());
+                }
+                KeyCode::PageUp => {
+                    ctx.terminal_panel.scroll_up();
+                    return Ok(());
+                }
+                KeyCode::PageDown => {
+                    ctx.terminal_panel.scroll_down();
+                    return Ok(());
+                }
+                _ => {
+                    let input = encode_key(key);
+                    if let Some(inst) = ctx.terminal_panel.instances.get(ctx.terminal_panel.active_idx) {
+                        if inst.process.write(input.as_bytes()).is_err() {
+                            ctx.terminal_panel.unfocus();
+                            ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                        }
+                    }
+                    return Ok(());
+                }
             }
         }
 
@@ -734,6 +779,87 @@ impl EventLoop {
                 }
             }
 
+            if ctx.terminal_panel.visible {
+                if let Some(term_area) = layout.terminal {
+                    frame.render_widget(Clear, term_area);
+
+                    ctx.terminal_panel.drain_all();
+
+                    let term_instances = ctx.terminal_panel.instances.len();
+                    let active_idx = ctx.terminal_panel.active_idx;
+
+                    let is_focused = ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal;
+                    let border_fg = if is_focused { theme.border_active } else { theme.border };
+
+                    // Tab bar
+                    let tab_height = 1u16;
+                    let tab_area = Rect::new(term_area.x, term_area.y, term_area.width, tab_height);
+                    let output_area = Rect::new(term_area.x, term_area.y + tab_height, term_area.width, term_area.height.saturating_sub(tab_height + 1));
+
+                    // Status line
+                    let status_area = Rect::new(term_area.x, term_area.y + term_area.height.saturating_sub(1), term_area.width, 1);
+
+                    // Render tab bar
+                    let mut tab_spans: Vec<Span> = Vec::new();
+                    for i in 0..term_instances {
+                        let is_active = i == active_idx;
+                        let tab_style = if is_active {
+                            Style::default().fg(theme.fg).bg(theme.palette_selection).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.comment).bg(theme.bg)
+                        };
+                        let label = ctx.terminal_panel.instances[i].title.as_str();
+                        tab_spans.push(Span::styled(format!(" {} ", label), tab_style));
+                    }
+                    let tab_line = Line::from(tab_spans);
+                    frame.render_widget(tab_line, tab_area);
+
+                    // Render terminal output
+                    let output_height = output_area.height as usize;
+                    let output_width = output_area.width as usize;
+
+                    if let Some(inst) = ctx.terminal_panel.instances.get(active_idx) {
+                        let lines = render_terminal_lines(
+                            &inst.visible_lines(output_height),
+                            &ctx.theme,
+                            output_width,
+                        );
+
+                        let para = Paragraph::new(lines)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::LEFT | Borders::RIGHT)
+                                    .border_style(Style::default().fg(border_fg)),
+                            )
+                            .style(Style::default().bg(ctx.theme.bg));
+                        frame.render_widget(para, output_area);
+                    }
+
+                    // Render status line
+                    let shell_name = ctx.terminal_panel.instances.get(active_idx)
+                        .map(|i| i.shell.as_str())
+                        .unwrap_or("term");
+                    let scroll_info = ctx.terminal_panel.instances.get(active_idx)
+                        .map(|i| if i.scroll_offset > 0 { format!(" [+{}]", i.scroll_offset) } else { String::new() })
+                        .unwrap_or_default();
+                    let status_text = format!(" {} {} | {}x{} {}",
+                        if is_focused { ">" } else { " " },
+                        shell_name,
+                        output_width, output_height,
+                        scroll_info,
+                    );
+                    let status_style = if is_focused {
+                        Style::default().fg(theme.fg).bg(theme.statusline_bg)
+                    } else {
+                        Style::default().fg(theme.comment).bg(theme.bg)
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(status_text, status_style))),
+                        status_area,
+                    );
+                }
+            }
+
             if ctx.palette.visible {
                 if let Some(palette_area) = layout.palette {
                     frame.render_widget(Clear, palette_area);
@@ -876,4 +1002,49 @@ impl EventLoop {
         }
     }
 
+}
+
+fn encode_key(key: KeyEvent) -> String {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Enter => "\r\n".to_string(),
+        KeyCode::Tab => "\t".to_string(),
+        KeyCode::Backspace => "\x7f".to_string(),
+        KeyCode::Esc => "\x1b".to_string(),
+        KeyCode::Left => "\x1b[D".to_string(),
+        KeyCode::Right => "\x1b[C".to_string(),
+        KeyCode::Up => "\x1b[A".to_string(),
+        KeyCode::Down => "\x1b[B".to_string(),
+        KeyCode::Home => "\x1b[H".to_string(),
+        KeyCode::End => "\x1b[F".to_string(),
+        KeyCode::PageUp => "\x1b[5~".to_string(),
+        KeyCode::PageDown => "\x1b[6~".to_string(),
+        KeyCode::Delete => "\x1b[3~".to_string(),
+        KeyCode::Insert => "\x1b[2~".to_string(),
+        KeyCode::F(n) => {
+            let code = match n {
+                1 => "OP", 2 => "OQ", 3 => "OR", 4 => "OS",
+                5 => "15~", 6 => "17~", 7 => "18~", 8 => "19~",
+                9 => "20~", 10 => "21~", 11 => "23~", 12 => "24~",
+                _ => return String::new(),
+            };
+            format!("\x1b[{}", code)
+        }
+        KeyCode::Char(c) => {
+            let mut s = String::new();
+            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                let code = (c as u8).saturating_sub(96);
+                if code >= 1 && code <= 26 {
+                    s.push(char::from(code));
+                    return s;
+                }
+            }
+            if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                s.push('\x1b');
+            }
+            s.push(c);
+            s
+        }
+        _ => String::new(),
+    }
 }

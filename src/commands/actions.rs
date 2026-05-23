@@ -176,6 +176,16 @@ pub enum Action {
     GitCommit,
     GitDiff,
 
+    ToggleTerminal,
+    FocusTerminal,
+    TerminalNextTab,
+    TerminalPrevTab,
+    TerminalNewTab,
+    TerminalCloseTab,
+    TerminalScrollUp,
+    TerminalScrollDown,
+    TerminalCyclePosition,
+
     Noop,
     NoOp,
 }
@@ -321,6 +331,15 @@ impl Action {
             Action::GitStageAll => "Stage all changes",
             Action::GitCommit => "Git commit",
             Action::GitDiff => "Show git diff",
+            Action::ToggleTerminal => "Toggle integrated terminal",
+            Action::FocusTerminal => "Focus terminal panel",
+            Action::TerminalNextTab => "Next terminal tab",
+            Action::TerminalPrevTab => "Previous terminal tab",
+            Action::TerminalNewTab => "New terminal tab",
+            Action::TerminalCloseTab => "Close terminal tab",
+            Action::TerminalScrollUp => "Scroll terminal up",
+            Action::TerminalScrollDown => "Scroll terminal down",
+            Action::TerminalCyclePosition => "Cycle terminal position",
             Action::Noop | Action::NoOp => "No operation",
         }
     }
@@ -403,6 +422,16 @@ impl Action {
             | Action::GitStageHunk | Action::GitUnstageHunk
             | Action::GitStageAll | Action::GitCommit | Action::GitDiff => ActionCategory::Git,
 
+            Action::ToggleTerminal
+            | Action::FocusTerminal
+            | Action::TerminalNextTab
+            | Action::TerminalPrevTab
+            | Action::TerminalNewTab
+            | Action::TerminalCloseTab
+            | Action::TerminalScrollUp
+            | Action::TerminalScrollDown
+            | Action::TerminalCyclePosition => ActionCategory::Terminal,
+
             Action::Noop | Action::NoOp | Action::Quit | Action::ForceQuit => ActionCategory::Application,
         }
     }
@@ -447,6 +476,7 @@ pub enum ActionCategory {
     Workspace,
     UI,
     Git,
+    Terminal,
     Application,
     Custom,
 }

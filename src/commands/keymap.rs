@@ -225,6 +225,12 @@ impl KeyMap {
         add(&mut km, alt_char('q'), Action::ClosePane, none);
         add(&mut km, alt_char('m'), Action::FocusPreview, none);
 
+        // Terminal keybindings
+        add(&mut km, key(KeyCode::F(12), KeyModifiers::NONE), Action::ToggleTerminal, none);
+        add(&mut km, alt_char('t'), Action::ToggleTerminal, none);
+        add(&mut km, ctrl('\\'), Action::FocusTerminal, none);
+        add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('t'), Action::ToggleTerminal, normal);
+
         // Git keybindings (g leader + key)
         add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('b'), Action::GitBlameToggle, normal);
         add_seq(&mut km, KeyCode::Char('g'), KeyCode::Char('s'), Action::GitStatus, normal);
