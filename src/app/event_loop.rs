@@ -7,18 +7,47 @@ use crate::core::Position;
 use crate::editor::cursor::Cursor;
 use crate::editor::selection::Selection;
 use crate::workspace::file_tree::TreeDisplayEntry;
-use crate::terminal::renderer::render_terminal_lines;
+use crate::terminal::renderer::render_vt100_lines;
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph, List, ListItem, Clear, Wrap};
 use ratatui::text::{Span, Line};
-use ratatui::style::{Style, Modifier};
+use ratatui::style::{Style, Modifier, Color};
+
+/// Suspend TUI input, hand terminal to a shell, then resume.
+/// During the shell the EventStream reader is STOPPED so the child
+/// has exclusive access to the host terminal's stdin.
+fn suspend_to_external(
+    input_handler: &mut InputHandler,
+    input_handle: &mut tokio::task::JoinHandle<()>,
+) {
+    // 1. Kill the old EventStream reader (competing for stdin)
+    input_handle.abort();
+    // 2. Drop the old channel — the aborted task's tx clone will Err
+    //    and the old reader exits cleanly.
+    *input_handler = InputHandler::new();
+    // 3. Run the shell with exclusive stdin access (blocks)
+    crate::terminal::suspend_to_shell();
+    // 4. Start a fresh reader on the new channel
+    *input_handle = input_handler.start_reading();
+}
 
 pub struct EventLoop;
 
 impl EventLoop {
     pub async fn run(config: crate::config::Config) -> Result<(), anyhow::Error> {
         let mut terminal = Self::setup_terminal()?;
+
+        // RAII guard ensures host terminal is restored even on panic
+        struct RawModeGuard;
+        impl Drop for RawModeGuard {
+            fn drop(&mut self) {
+                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+            }
+        }
+        let _guard = RawModeGuard;
+
         let files = config.files.clone();
         let mut ctx = AppContext::new(config);
 
@@ -30,7 +59,7 @@ impl EventLoop {
         }
 
         let mut input_handler = InputHandler::new();
-        let _input_handle = input_handler.start_reading();
+        let mut input_handle = input_handler.start_reading();
 
         if let Err(e) = Self::render(&mut terminal, &mut ctx) {
             eprintln!("Initial render error: {}", e);
@@ -40,7 +69,7 @@ impl EventLoop {
             let event = input_handler.recv().await;
             match event {
                 Some(InputEvent::Key(key)) => {
-                    if let Err(msg) = Self::handle_key_event(&mut ctx, key) {
+                    if let Err(msg) = Self::handle_key_event(&mut ctx, key, &mut input_handler, &mut input_handle) {
                         ctx.push_error(msg);
                     }
                 }
@@ -49,12 +78,21 @@ impl EventLoop {
                     Self::handle_tick(&mut ctx);
                 }
                 Some(InputEvent::Mouse(mouse)) => {
+                    let terminal_focused = ctx.terminal_panel.visible && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal;
                     match mouse.kind {
                         crossterm::event::MouseEventKind::ScrollDown => {
-                            ctx.handle_action(&Action::MoveDown).ok();
+                            if terminal_focused {
+                                ctx.terminal_panel.scroll_down();
+                            } else {
+                                ctx.handle_action(&Action::MoveDown).ok();
+                            }
                         }
                         crossterm::event::MouseEventKind::ScrollUp => {
-                            ctx.handle_action(&Action::MoveUp).ok();
+                            if terminal_focused {
+                                ctx.terminal_panel.scroll_up();
+                            } else {
+                                ctx.handle_action(&Action::MoveUp).ok();
+                            }
                         }
                         _ => {}
                     }
@@ -95,7 +133,12 @@ impl EventLoop {
         Ok(())
     }
 
-    fn handle_key_event(ctx: &mut AppContext, raw_key: KeyEvent) -> Result<(), String> {
+    fn handle_key_event(
+        ctx: &mut AppContext,
+        raw_key: KeyEvent,
+        input_handler: &mut InputHandler,
+        input_handle: &mut tokio::task::JoinHandle<()>,
+    ) -> Result<(), String> {
         let essential_mods = {
             let m = raw_key.modifiers;
             let mut out = KeyModifiers::NONE;
@@ -243,12 +286,14 @@ impl EventLoop {
         }
 
         if ctx.terminal_panel.visible && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal {
+            // Ctrl+\ toggles focus back to editor
+            if key.code == KeyCode::Char('\x1c') ||
+                (key.code == KeyCode::Char('\\') && key.modifiers == KeyModifiers::CONTROL) {
+                ctx.terminal_panel.unfocus();
+                ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                return Ok(());
+            }
             match key.code {
-                KeyCode::Esc => {
-                    ctx.terminal_panel.unfocus();
-                    ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
-                    return Ok(());
-                }
                 KeyCode::Tab if key.modifiers == KeyModifiers::CONTROL => {
                     ctx.terminal_panel.next_instance();
                     return Ok(());
@@ -273,12 +318,56 @@ impl EventLoop {
                     ctx.terminal_panel.scroll_down();
                     return Ok(());
                 }
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    // Ctrl+U - scroll up half a page
+                    let half = (ctx.terminal_panel.height as usize / 2).max(1);
+                    for _ in 0..half {
+                        ctx.terminal_panel.scroll_up();
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                    // Ctrl+D - scroll down half a page
+                    let half = (ctx.terminal_panel.height as usize / 2).max(1);
+                    for _ in 0..half {
+                        ctx.terminal_panel.scroll_down();
+                    }
+                    return Ok(());
+                }
+                KeyCode::F(12) => {
+                    // Restart the PTY shell so it's fresh on return
+                    ctx.terminal_panel.restart_active();
+                    // Suspend with exclusive stdin access
+                    suspend_to_external(input_handler, input_handle);
+                    return Ok(());
+                }
                 _ => {
                     let input = encode_key(key);
-                    if let Some(inst) = ctx.terminal_panel.instances.get(ctx.terminal_panel.active_idx) {
-                        if inst.process.write(input.as_bytes()).is_err() {
-                            ctx.terminal_panel.unfocus();
-                            ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+
+                    // Drain pending output FIRST so ConPTY pipe-break
+                    // state changes are visible before we check below.
+                    ctx.terminal_panel.drain_all();
+
+                    // If the terminal session has ended, restart on keypress.
+                    if ctx.terminal_panel.active()
+                        .map_or(false, |inst| !inst.is_running())
+                    {
+                        ctx.terminal_panel.restart_active();
+                    }
+
+                    // Forward the key to the PTY.
+                    if let Some(inst) = ctx.terminal_panel.active() {
+                        if let Err(_) = inst.process.write(input.as_bytes()) {
+                            // Write failed — the PTY writer may be in a bad state
+                            // (e.g. ConPTY closed the pipe after a child process exited).
+                            // Try once more with a fresh session.
+                            let written = crate::terminal::panel::retry_write(
+                                &mut ctx.terminal_panel,
+                                input.as_bytes(),
+                            );
+                            if !written {
+                                ctx.push_error("Terminal error. Press F12 to restart.");
+                            }
                         }
                     }
                     return Ok(());
@@ -353,6 +442,15 @@ impl EventLoop {
                 }
                 _ => {}
             }
+        }
+
+        // Global F12: suspend to shell (works from any pane)
+        if key.code == KeyCode::F(12) {
+            if ctx.terminal_panel.visible {
+                ctx.terminal_panel.restart_active();
+                suspend_to_external(input_handler, input_handle);
+            }
+            return Ok(());
         }
 
         match mode {
@@ -435,6 +533,17 @@ impl EventLoop {
 
     fn handle_tick(ctx: &mut AppContext) {
         ctx.tick();
+
+        // Auto-restart the terminal if it's in Exited state while visible.
+        // On the next render the fresh shell prompt will appear, so the user
+        // doesn't need to press a key to restart.
+        if ctx.terminal_panel.visible {
+            if let Some(inst) = ctx.terminal_panel.active() {
+                if !inst.is_running() {
+                    ctx.terminal_panel.restart_active();
+                }
+            }
+        }
     }
 
     fn render(terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, ctx: &mut AppContext) -> Result<(), anyhow::Error> {
@@ -783,13 +892,15 @@ impl EventLoop {
                 if let Some(term_area) = layout.terminal {
                     frame.render_widget(Clear, term_area);
 
-                    ctx.terminal_panel.drain_all();
-
                     let term_instances = ctx.terminal_panel.instances.len();
                     let active_idx = ctx.terminal_panel.active_idx;
 
                     let is_focused = ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal;
                     let border_fg = if is_focused { theme.border_active } else { theme.border };
+                    let bg_style = Style::default().bg(theme.bg);
+
+                    // Fill entire terminal area with theme background
+                    frame.render_widget(ratatui::widgets::Block::default().style(bg_style), term_area);
 
                     // Tab bar
                     let tab_height = 1u16;
@@ -798,6 +909,13 @@ impl EventLoop {
 
                     // Status line
                     let status_area = Rect::new(term_area.x, term_area.y + term_area.height.saturating_sub(1), term_area.width, 1);
+
+                    // Resize PTY+grid to match the display area (excl. borders)
+                    let resize_cols = output_area.width.saturating_sub(2).max(10);
+                    let resize_rows = output_area.height.max(1);
+                    ctx.terminal_panel.resize_active(resize_cols, resize_rows);
+
+                    ctx.terminal_panel.drain_all();
 
                     // Render tab bar
                     let mut tab_spans: Vec<Span> = Vec::new();
@@ -811,18 +929,28 @@ impl EventLoop {
                         let label = ctx.terminal_panel.instances[i].title.as_str();
                         tab_spans.push(Span::styled(format!(" {} ", label), tab_style));
                     }
+                    let tab_bg = Line::from(Span::styled(" ".repeat(tab_area.width as usize), bg_style));
+                    frame.render_widget(tab_bg, tab_area);
                     let tab_line = Line::from(tab_spans);
                     frame.render_widget(tab_line, tab_area);
 
                     // Render terminal output
                     let output_height = output_area.height as usize;
                     let output_width = output_area.width as usize;
+                    let content_width = output_width.saturating_sub(2); // account for borders
 
-                    if let Some(inst) = ctx.terminal_panel.instances.get(active_idx) {
-                        let lines = render_terminal_lines(
-                            &inst.visible_lines(output_height),
+                    let terminal_exited = ctx.terminal_panel.instances.get(active_idx)
+                        .map(|inst| !inst.is_running())
+                        .unwrap_or(false);
+                    if let Some(inst) = ctx.terminal_panel.instances.get_mut(active_idx) {
+                        let (lines, _) = render_vt100_lines(
+                            &mut inst.parser,
+                            output_height,
+                            inst.scroll_offset,
                             &ctx.theme,
-                            output_width,
+                            content_width,
+                            is_focused,
+                            terminal_exited,
                         );
 
                         let para = Paragraph::new(lines)
@@ -833,15 +961,33 @@ impl EventLoop {
                             )
                             .style(Style::default().bg(ctx.theme.bg));
                         frame.render_widget(para, output_area);
+
+                        // Exit overlay
+                        if let Some(msg) = inst.exit_message() {
+                            let overlay_style = Style::default()
+                                .fg(theme.bg)
+                                .bg(Color::Red);
+                            let exit_line = Line::from(Span::styled(msg, overlay_style));
+                            let exit_para = Paragraph::new(exit_line)
+                                .style(Style::default().bg(Color::Red));
+                            let exit_area = Rect::new(
+                                output_area.x + 1,
+                                output_area.y + output_area.height.saturating_sub(2),
+                                (msg.len() as u16).min(output_area.width.saturating_sub(2)),
+                                1,
+                            );
+                            frame.render_widget(ratatui::widgets::Clear, exit_area);
+                            frame.render_widget(exit_para, exit_area);
+                        }
                     }
 
                     // Render status line
-                    let shell_name = ctx.terminal_panel.instances.get(active_idx)
-                        .map(|i| i.shell.as_str())
-                        .unwrap_or("term");
-                    let scroll_info = ctx.terminal_panel.instances.get(active_idx)
-                        .map(|i| if i.scroll_offset > 0 { format!(" [+{}]", i.scroll_offset) } else { String::new() })
-                        .unwrap_or_default();
+                    let (shell_name, scroll_info) = ctx.terminal_panel.instances.get_mut(active_idx)
+                        .map(|i| {
+                            let info = if i.scroll_offset > 0 { format!(" [+{}]", i.scroll_offset) } else { String::new() };
+                            (i.shell.as_str(), info)
+                        })
+                        .unwrap_or(("term", String::new()));
                     let status_text = format!(" {} {} | {}x{} {}",
                         if is_focused { ">" } else { " " },
                         shell_name,
@@ -853,8 +999,10 @@ impl EventLoop {
                     } else {
                         Style::default().fg(theme.comment).bg(theme.bg)
                     };
+                    let status_bg = Line::from(Span::styled(" ".repeat(status_area.width as usize), status_style));
+                    frame.render_widget(status_bg, status_area);
                     frame.render_widget(
-                        Paragraph::new(Line::from(Span::styled(status_text, status_style))),
+                        Line::from(Span::styled(status_text, status_style)),
                         status_area,
                     );
                 }
@@ -1033,11 +1181,13 @@ fn encode_key(key: KeyEvent) -> String {
         KeyCode::Char(c) => {
             let mut s = String::new();
             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                let code = (c as u8).saturating_sub(96);
-                if code >= 1 && code <= 26 {
-                    s.push(char::from(code));
-                    return s;
-                }
+                let code = if (c as u8) >= 32 {
+                    (c as u8) & 0x1f
+                } else {
+                    c as u8
+                };
+                s.push(char::from(code));
+                return s;
             }
             if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
                 s.push('\x1b');

@@ -388,6 +388,7 @@ Press `F12` or `Alt+t` (or `:terminal` / `:term` in command mode) to open and cl
 ### Features
 
 - **Full PTY support** — runs any CLI tool including AI agents (opencode, claude code, codex) with proper terminal emulation
+- **Fixed ConPTY stuck-state** — subprocess exits (opencode, vim, etc.) no longer leave the terminal frozen; auto-recovers within seconds
 - **Multiple tabs** — switch between terminal instances with `Ctrl+Tab` / `Ctrl+Shift+Tab`
 - **Configurable position** — terminal can be placed at bottom, top, or right side (use `g t` to cycle positions)
 - **Scrollback** — `Shift+↑` / `Shift+↓` or `PageUp` / `PageDown` to scroll through output
@@ -407,6 +408,27 @@ Press `F12` or `Alt+t` (or `:terminal` / `:term` in command mode) to open and cl
 | `Shift+↑` / `PageUp` | Scroll up |
 | `Shift+↓` / `PageDown` | Scroll down |
 | `g t` | Cycle terminal position (bottom → right → top) |
+
+### Tutorial: Using the integrated terminal
+
+1. **Open the terminal** — Press `F12` or `Alt+t` (or type `:terminal` in command mode)
+2. **Run commands** — Type any command like you would in a normal terminal:
+   ```
+   C:\Users\you> dir
+   C:\Users\you> cd projects
+   C:\Users\you> npm run dev
+   ```
+3. **Run AI agents** — The terminal supports interactive TUI programs:
+   ```
+   C:\Users\you> opencode
+   C:\Users\you> claude
+   ```
+   After the agent exits, you return to the shell prompt automatically.
+4. **Switch focus** — Press `Ctrl+\` to focus the terminal panel, or `Esc` (inside terminal handler) to return to the editor
+5. **Multiple tabs** — Press `Ctrl+Tab` for the next tab, `Ctrl+Shift+Tab` for the previous tab. Spawn a new tab with `:term powershell`
+6. **Scroll** — Use `PageUp`/`PageDown` or `Shift+↑`/`Shift+↓` to scroll through terminal output
+7. **Close the terminal** — Press `F12` or `Alt+t` again, or type `exit` in the shell then press `Esc`
+8. **When the terminal gets stuck** — If a subprocess (like opencode) exits and the terminal appears frozen, wait a few seconds and it will auto-restart. You can also press any key to trigger a restart, or press `F12` to suspend to the host shell and then `exit` to return.
 
 ### Commands
 
@@ -441,7 +463,7 @@ Upcoming features planned:
 | Multi-cursor (Ctrl+D) | 🔜 Planned |
 | Macro recording/playback | 🔜 Planned |
 | Bookmarks (m' / ') | 🔜 Planned |
-| **Integrated terminal (F12 / :term)** | ⚠️ **Needs more work** |
+| **Integrated terminal (F12 / :term)** | ⚠️ **Mostly working — ConPTY stuck-state fixed** |
 | LSP integration (completions, diagnostics, go-to-def) | 🔜 Planned |
 | Git integration (inline blame, staging panel) | ✅ Done |
 | **Branch graph log (`:branch` / `g r`)** | ⚠️ **Needs more work** |
@@ -450,11 +472,13 @@ Upcoming features planned:
 
 > **⚠️ Integrated terminal — needs more work:**
 > The terminal is a first pass with basic PTY support. Known limitations:
-> - No ANSI color parsing yet (displays raw escape sequences)
 > - No copy/paste support
-> - Terminal resize on window resize not yet implemented  
 > - No search in terminal scrollback
 > - Only tested on Windows (cmd.exe)
+> - **Fixed:** ConPTY v2 pipe-break on subprocess exit (e.g. opencode, vim)
+>   was causing the terminal to appear stuck after the subprocess exited.
+>   The reader thread now waits up to 30s and verifies the shell is still
+>   alive before giving up. The terminal auto-restarts when detected stuck.
 >
 > Contributions and improvements welcome.
 

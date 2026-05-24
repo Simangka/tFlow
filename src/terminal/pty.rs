@@ -1,14 +1,15 @@
-use portable_pty::{PtySize, CommandBuilder, Child};
+use portable_pty::{PtySize, CommandBuilder, Child, MasterPty, SlavePty};
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use parking_lot::Mutex;
 
 pub struct TerminalProcess {
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
-    child: Option<Box<dyn Child + Send + Sync>>,
-    pub child_exited: Arc<std::sync::atomic::AtomicBool>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    _slave: Option<Box<dyn SlavePty + Send>>,
+    child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
 }
 
 impl TerminalProcess {
@@ -17,42 +18,102 @@ impl TerminalProcess {
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| format!("PTY: {}", e))?;
 
-        let cmd = CommandBuilder::new(shell);
+        let mut cmd = CommandBuilder::new(shell);
+        if let Ok(cwd) = std::env::current_dir() {
+            cmd.cwd(cwd);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("CLICOLOR", "1");
+        cmd.env("CLICOLOR_FORCE", "1");
         let child = pair.slave.spawn_command(cmd)
             .map_err(|e| format!("spawn: {}", e))?;
 
-        let reader = pair.master.try_clone_reader()
-            .map_err(|e| format!("reader: {}", e))?;
         let writer = pair.master.take_writer()
             .map_err(|e| format!("writer: {}", e))?;
 
+        let master = Arc::new(Mutex::new(pair.master));
+        let child = Arc::new(Mutex::new(Some(child)));
         let (tx, rx) = mpsc::unbounded_channel();
-        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let exit = exited.clone();
 
+        let master_clone = master.clone();
+        let child_clone = child.clone();
         std::thread::spawn(move || {
-            let mut buf = vec![0u8; 4096];
-            let mut r = reader;
+            let mut r = match master_clone.lock().try_clone_reader() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[tflow-pty] reader clone failed: {e}");
+                    return;
+                }
+            };
+            let mut buf = vec![0u8; 16384];
+            let mut drained = false;
+            let mut zero_count: u32 = 0;
+            let mut zero_start: Option<Instant> = None;
             loop {
                 match r.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        // First Ok(0) = ConPTY flush signal.
+                        if !drained {
+                            drained = true;
+                            zero_count = 0;
+                            zero_start = None;
+                            if tx.send(vec![]).is_err() { break; }
+                            continue;
+                        }
+                        // Subsequent Ok(0)s = potential pipe break (ConPTY v2
+                        // terminates the anonymous pipe on subprocess exit).
+                        zero_count += 1;
+                        if zero_start.is_none() {
+                            zero_start = Some(Instant::now());
+                        }
+
+                        // Hard timeout: if the pipe has been broken for
+                        // >30s without any data, force a restart regardless
+                        // of whether the shell is alive.
+                        if zero_start.map_or(false, |t| t.elapsed() > Duration::from_secs(30)) {
+                            break;
+                        }
+
+                        // Liveness check (~10s): see if the shell truly exited.
+                        if zero_count >= 100 {
+                            let really_gone = child_clone.lock()
+                                .as_mut()
+                                .and_then(|c| c.try_wait().ok()?)
+                                .is_some();
+                            if really_gone {
+                                break; // shell exited — permanent break
+                            }
+                            // Shell is still alive — the pipe may recover.
+                            // Keep zero_start so the hard timeout keeps ticking.
+                            zero_count = 0;
+                            drained = false;
+                        }
+
+                        if tx.send(vec![]).is_err() { break; }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
                     Ok(n) => {
+                        drained = false;
+                        zero_count = 0;
+                        zero_start = None;
                         let data = buf[..n].to_vec();
                         if tx.send(data).is_err() {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        break;
+                    }
                 }
             }
-            exit.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
         Ok((TerminalProcess {
             writer: Arc::new(Mutex::new(writer)),
-            master: Arc::new(Mutex::new(pair.master)),
-            child: Some(child),
-            child_exited: exited,
+            master,
+            _slave: Some(pair.slave),
+            child,
         }, rx))
     }
 
@@ -66,24 +127,15 @@ impl TerminalProcess {
         }
     }
 
-    pub fn is_alive(&self) -> bool {
-        !self.child_exited.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn check_exit(&mut self) -> Option<u32> {
-        if let Some(ref mut child) = self.child {
-            if let Ok(Some(status)) = child.try_wait() {
-                self.child_exited.store(true, std::sync::atomic::Ordering::SeqCst);
-                return Some(status.exit_code());
-            }
-        }
-        None
+    pub fn close(&mut self) {
+        *self.child.lock() = None;
+        self._slave = None;
     }
 }
 
 impl Drop for TerminalProcess {
     fn drop(&mut self) {
-        if let Some(ref mut child) = self.child {
+        if let Some(ref mut child) = *self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
         }
