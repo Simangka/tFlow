@@ -99,6 +99,10 @@ impl History {
         self.last_entry_time = None;
     }
 
+    pub fn peek_last(&self) -> Option<&HistoryEntry> {
+        self.entries.last()
+    }
+
     pub fn group_with_last(&self, _entry: &HistoryEntry) -> bool {
         if self.entries.is_empty() {
             return false;

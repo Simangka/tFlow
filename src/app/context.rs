@@ -19,6 +19,8 @@ use crate::rendering::engine::RenderEngine;
 use crate::ui::UILayout;
 use crate::ui::split::SplitManager;
 use crate::terminal::TerminalPanel;
+use crate::lsp::LspCommand;
+use tokio::sync::mpsc;
 
 pub struct AppContext {
     pub buffers: Vec<Buffer>,
@@ -57,6 +59,14 @@ pub struct AppContext {
     pub terminal_panel: TerminalPanel,
     pub show_blame: bool,
     pub git_branch: Option<String>,
+    pub lsp_tx: Option<mpsc::UnboundedSender<LspCommand>>,
+    pub lsp_diagnostics: Vec<lsp_types::Diagnostic>,
+    pub completion_items: Vec<lsp_types::CompletionItem>,
+    pub show_completion: bool,
+    pub completion_selected: usize,
+    pub last_keypress: std::time::Instant,
+    pub completion_pending: bool,
+    pub lsp_enabled: bool,
 }
 
 impl AppContext {
@@ -142,6 +152,14 @@ impl AppContext {
             branch_view: crate::git::BranchViewPanel::new(),
             show_blame: false,
             git_branch: None,
+            lsp_tx: None,
+            lsp_diagnostics: Vec::new(),
+            completion_items: Vec::new(),
+            show_completion: false,
+            completion_selected: 0,
+            last_keypress: std::time::Instant::now(),
+            completion_pending: false,
+            lsp_enabled: true,
         }
     }
 
@@ -217,11 +235,12 @@ impl AppContext {
         }
 
         let id = self.buffers.len();
-        let buffer = Buffer::from_path(id, path)?;
+        let buffer = Buffer::from_path(id, path.clone())?;
         self.buffers.push(buffer);
         self.histories.push(History::new(100));
         self.sync_to_pane();
         self.active_buffer = id;
+        self.send_did_open_to_lsp(id);
         if let Some(pane) = self.split_manager.active_pane() {
             pane.buffer_id = id;
         }
@@ -239,6 +258,10 @@ impl AppContext {
         let buf = &self.buffers[self.active_buffer];
         if buf.dirty && !self.force_quit {
             return false;
+        }
+
+        if self.lsp_enabled {
+            self.send_lsp(LspCommand::DidClose { doc_id: self.active_buffer });
         }
 
         self.sync_to_pane();
@@ -522,6 +545,9 @@ impl AppContext {
                 self.push_success("File saved");
                 if let Some(ref mut ft) = self.file_tree {
                     let _ = ft.refresh();
+                }
+                if self.lsp_enabled {
+                    self.send_lsp(LspCommand::DidSave { doc_id: self.active_buffer });
                 }
             }
             Action::SaveFileAs => {
@@ -1342,6 +1368,10 @@ impl AppContext {
             self.search_state = SearchState::default();
         }
 
+        if self.is_modification_action(action) && self.lsp_enabled {
+            self.notify_lsp_change(action);
+        }
+
         self.update_cursor();
         self.sync_to_pane();
         Ok(())
@@ -1451,6 +1481,156 @@ impl AppContext {
             .map_err(|e| format!("Clipboard error: {}", e))
     }
 
+    pub fn send_lsp(&self, cmd: LspCommand) {
+        if let Some(ref tx) = self.lsp_tx {
+            let _ = tx.send(cmd);
+        }
+    }
+
+    pub fn notify_lsp_change(&self, action: &Action) {
+        let buf = match self.buffers.get(self.active_buffer) {
+            Some(b) => b,
+            None => return,
+        };
+        let path = match &buf.path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => return,
+        };
+        let lang_config = crate::lsp::config::LanguageServerConfig::new();
+        let lang_id = match lang_config.language_for_extension(ext) {
+            Some(l) => l.clone(),
+            None => return,
+        };
+        if !lang_config.has_server_for(&lang_id) {
+            return;
+        }
+
+        let change = self.build_change_from_action(action, buf);
+        let _ = self.lsp_tx.as_ref().map(|tx| {
+            tx.send(LspCommand::DidChange {
+                doc_id: self.active_buffer,
+                version: 0,
+                changes: vec![change],
+            })
+        });
+    }
+
+    fn build_change_from_action(&self, _action: &Action, buf: &Buffer) -> lsp_types::TextDocumentContentChangeEvent {
+        // Always send full text to avoid range-mismatch bugs with incremental sync.
+        let full_text = buf.get_text();
+        lsp_types::TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: full_text,
+        }
+    }
+
+    pub fn send_did_open_to_lsp(&self, buffer_id: usize) {
+        let buf = match self.buffers.get(buffer_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let path = match &buf.path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let lang_id = crate::lsp::config::LanguageServerConfig::new()
+            .language_for_extension(ext)
+            .cloned()
+            .unwrap_or_else(|| ext.to_string());
+        let text = buf.get_text();
+        self.send_lsp(LspCommand::DidOpen {
+            doc_id: buffer_id,
+            path,
+            language_id: lang_id,
+            text,
+            version: 1,
+        });
+    }
+
+    pub fn trigger_completion(&mut self) {
+        self.completion_pending = false;
+        let buf = match self.buffers.get(self.active_buffer) {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Only trigger when there's a word prefix at the cursor position
+        let line_text = buf.get_line(self.cursor.position.line);
+        let col = self.cursor.position.column.min(line_text.len());
+        let has_prefix = line_text[..col]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .next()
+            .is_some();
+        if !has_prefix {
+            return;
+        }
+
+        let pos = lsp_types::Position::new(
+            self.cursor.position.line as u32,
+            crate::lsp::types::char_offset_to_utf16(&line_text, self.cursor.position.column),
+        );
+        let ext = buf.path.as_ref()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let lang_config = crate::lsp::config::LanguageServerConfig::new();
+        if !lang_config.has_server_for(lang_config.language_for_extension(ext).unwrap_or(&ext.to_string())) {
+            return;
+        }
+        if self.lsp_tx.is_none() {
+            self.push_info("LSP: no channel (server not initialized)");
+            return;
+        }
+        self.push_info("LSP completion request sent");
+        self.send_lsp(LspCommand::Completion {
+            doc_id: self.active_buffer,
+            position: pos,
+            trigger_kind: Some(lsp_types::CompletionTriggerKind::INVOKED),
+            trigger_character: None,
+        });
+    }
+
+    pub fn accept_completion(&mut self) {
+        let items = std::mem::take(&mut self.completion_items);
+        self.show_completion = false;
+        let idx = self.completion_selected;
+        if idx >= items.len() { return; }
+        let item = &items[idx];
+        let text = item.insert_text.as_deref().unwrap_or(&item.label).to_string();
+        // Delete the word being completed (from cursor back to last non-word char)
+        let buf = match self.buffers.get(self.active_buffer) {
+            Some(b) => b,
+            None => return,
+        };
+        let line_text = buf.get_line(self.cursor.position.line);
+        let col = self.cursor.position.column;
+        let prefix_len = line_text[..col.min(line_text.len())]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .count();
+        for _ in 0..prefix_len {
+            let _ = self.handle_action(&Action::DeleteBackward);
+        }
+        // Insert the completion text
+        for ch in text.chars() {
+            let action = if ch == '\n' {
+                Action::InsertNewline
+            } else {
+                Action::InsertChar(ch)
+            };
+            let _ = self.handle_action(&action);
+        }
+    }
+
     pub fn update_title(&self) -> String {
         let buf = self.active_buffer();
         let modified = if buf.dirty { " [+] " } else { "" };
@@ -1476,5 +1656,7 @@ impl AppContext {
         self.start_time.elapsed()
     }
 }
+
+
 
 

@@ -90,9 +90,9 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            position: "bottom".to_string(),
+            position: "right".to_string(),
             height: 12,
-            width: 40,
+            width: 100,
         }
     }
 }

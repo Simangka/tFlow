@@ -122,10 +122,11 @@ tFlow uses a vim-inspired modal system:
 |-----|--------|
 | `Esc` | Return to Normal mode |
 | `Ctrl+c` | Return to Normal mode |
-| `Backspace` | Delete character backward |
-| `Delete` | Delete character forward |
-| `Enter` | Insert newline |
-| `Tab` | Insert tab |
+| `Backspace` | Delete character backward (hides completion) |
+| `Delete` | Delete character forward (hides completion) |
+| `Enter` | Accept completion, or insert newline |
+| `Tab` | Accept completion, or insert tab |
+| `↑` / `↓` | Navigate completion list |
 
 #### Visual mode
 
@@ -348,7 +349,70 @@ The graph visualises branching and merging with Unicode line-drawing characters:
 
 ---
 
-## Architecture
+## LSP Integration (Beta)
+
+tFlow includes built-in language server protocol (LSP) support for completions, diagnostics, hover, go-to-definition, and more. The LSP manager starts language servers on demand when you open a matching file type.
+
+### Supported languages & servers
+
+| Language | Server | Features |
+|----------|--------|----------|
+| Python | `pyright-langserver` | Completions, diagnostics, hover, go-to-definition, references, semantic tokens |
+| Rust | `rust-analyzer` | Completions, diagnostics, hover, go-to-definition, references, semantic tokens |
+| JavaScript / TypeScript / JSX / TSX | `typescript-language-server` | Completions, diagnostics, hover, go-to-definition, references, semantic tokens |
+| C / C++ | `clangd` | Completions, diagnostics, hover, go-to-definition, references |
+
+> **Note:** Make sure the relevant language server is installed and available in your `PATH`.
+
+### Completions
+
+tFlow triggers completions automatically while typing in Insert mode:
+
+| Trigger | Behavior |
+|---------|----------|
+| Type any alphanumeric/underscore characters | Completion pops up after ~80ms of idle typing |
+| `↑` / `↓` | Navigate through the completion list |
+| `Enter` / `Tab` | Accept the selected completion |
+| `Esc` / `Backspace` / `Delete` / type a non-word character | Dismiss the completion popup |
+
+Completions are sorted client-side so that prefix-exact matches appear first, then substring matches, then the rest. Accepted completions replace the word prefix at the cursor.
+
+### Diagnostics
+
+When you open a file with LSP support, tFlow connects to the language server and displays diagnostics (errors, warnings, info) in the status line:
+
+```
+NORMAL | 1:1 | 42 lines | main.py  2E 3W
+```
+
+### Server lifecycle
+
+- Servers start automatically when the first matching file is opened
+- Servers shut down gracefully when tFlow exits
+- If a server crashes, tFlow logs the error and continues working (restart by reopening the file)
+
+### Requirements
+
+Install the language server(s) you need:
+
+```bash
+# Python
+npm install -g pyright
+
+# Rust (via rustup)
+rustup component add rust-analyzer
+
+# JavaScript / TypeScript
+npm install -g typescript-language-server
+
+# C / C++
+# Install clangd via your package manager:
+#   Ubuntu: apt install clangd
+#   macOS:  brew install llvm
+#   Windows: Install LLVM from https://llvm.org
+```
+
+---
 
 ```
 src/
@@ -464,7 +528,7 @@ Upcoming features planned:
 | Macro recording/playback | 🔜 Planned |
 | Bookmarks (m' / ') | 🔜 Planned |
 | **Integrated terminal (F12 / :term)** | ⚠️ **Mostly working — ConPTY stuck-state fixed** |
-| LSP integration (completions, diagnostics, go-to-def) | 🔜 Planned |
+| LSP integration (completions, diagnostics, go-to-def) | ⚠️ **Works but needs optimization** |
 | Git integration (inline blame, staging panel) | ✅ Done |
 | **Branch graph log (`:branch` / `g r`)** | ⚠️ **Needs more work** |
 | Live markdown preview | 🔜 Planned |

@@ -62,9 +62,9 @@ impl UILayout {
 			show_staging_panel: false,
 			show_branch_view: false,
 			show_terminal: false,
-			terminal_position: TerminalPosition::Bottom,
+			terminal_position: TerminalPosition::Right,
 			terminal_height: 12,
-			terminal_width: 40,
+			terminal_width: 100,
 			split_direction: SplitDirection::Horizontal,
             focused_pane: FocusedPane::Editor,
         }
@@ -163,12 +163,12 @@ impl UILayout {
                     (chunks[1], Some(chunks[0]))
                 }
                 TerminalPosition::Right => {
-                    let w = self.terminal_width.min(editor.width.saturating_sub(20));
-                    let chunks = Layout::default()
+                    let w = self.terminal_width.min(editor.width.saturating_sub(20)).max(60);
+                    let parts = Layout::default()
                         .direction(Direction::Horizontal)
                         .constraints([Constraint::Min(1), Constraint::Length(w)])
                         .split(editor);
-                    (chunks[0], Some(chunks[1]))
+                    (parts[0], Some(parts[1]))
                 }
             }
         } else {

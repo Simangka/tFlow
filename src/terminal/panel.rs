@@ -1,6 +1,5 @@
-use std::collections::VecDeque;
-use tokio::sync::mpsc;
 use crate::terminal::pty::TerminalProcess;
+use tokio::sync::mpsc;
 
 const MAX_SCROLLBACK: usize = 5000;
 
@@ -13,17 +12,24 @@ pub enum TerminalPosition {
 
 impl Default for TerminalPosition {
     fn default() -> Self {
-        TerminalPosition::Bottom
+        TerminalPosition::Right
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerminalState {
+    Running,
+    Exited(String),
 }
 
 pub struct TerminalInstance {
     pub process: TerminalProcess,
     pub rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    pub scrollback: VecDeque<String>,
+    pub parser: vt100::Parser,
     pub title: String,
     pub scroll_offset: usize,
     pub shell: String,
+    pub state: TerminalState,
 }
 
 impl TerminalInstance {
@@ -32,62 +38,68 @@ impl TerminalInstance {
         Ok(TerminalInstance {
             process,
             rx,
-            scrollback: VecDeque::with_capacity(MAX_SCROLLBACK),
+            parser: vt100::Parser::new(rows.max(1), cols.max(10), MAX_SCROLLBACK),
             title,
             scroll_offset: 0,
             shell: shell.to_string(),
+            state: TerminalState::Running,
         })
     }
 
+    pub fn restart(&mut self) -> Result<(), String> {
+        let (cur_rows, cur_cols) = self.parser.screen().size();
+        let cols = cur_cols.max(10);
+        let rows = cur_rows.max(1);
+        let (process, rx) = TerminalProcess::spawn(&self.shell, cols, rows)?;
+        self.process = process;
+        self.rx = rx;
+        self.parser = vt100::Parser::new(rows, cols, MAX_SCROLLBACK);
+        self.state = TerminalState::Running;
+        self.scroll_offset = 0;
+        Ok(())
+    }
+
     pub fn drain_output(&mut self) {
-        while let Ok(data) = self.rx.try_recv() {
-            if let Ok(text) = String::from_utf8(data) {
-                self.push_text(&text);
+        loop {
+            match self.rx.try_recv() {
+                Ok(bytes) if bytes.is_empty() => {
+                    self.parser.process(b"\x1b[?1049l\x1b[?25h");
+                }
+                Ok(bytes) => self.parser.process(&bytes),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    // Reader thread exited because the PTY pipe was
+                    // broken — the shell process has truly exited.
+                    // Do NOT use try_wait() here because on ConPTY v2
+                    // it can fire prematurely when a subprocess exits.
+                    if matches!(self.state, TerminalState::Running) {
+                        self.state = TerminalState::Exited("[shell exited]".to_string());
+                        self.process.close();
+                        self.reset_scroll();
+                    }
+                    break;
+                }
             }
         }
     }
 
-    fn push_text(&mut self, text: &str) {
-        for c in text.chars() {
-            if c == '\r' { continue; }
-            if c == '\n' {
-                if self.scrollback.is_empty() || !self.scrollback.back().map_or(false, |s| !s.is_empty()) {
-                    self.scrollback.push_back(String::new());
-                } else {
-                    self.scrollback.push_back(String::new());
-                }
-            } else if c == '\x08' {
-                if let Some(last) = self.scrollback.back_mut() {
-                    last.pop();
-                }
-            } else {
-                if self.scrollback.is_empty() {
-                    self.scrollback.push_back(String::new());
-                }
-                if let Some(last) = self.scrollback.back_mut() {
-                    last.push(c);
-                }
-            }
-        }
-        while self.scrollback.len() > MAX_SCROLLBACK {
-            self.scrollback.pop_front();
-        }
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, TerminalState::Running)
     }
 
-    pub fn visible_lines(&self, height: usize) -> Vec<String> {
-        let total = self.scrollback.len();
-        let start = if self.scroll_offset > 0 {
-            let s = total.saturating_sub(height).saturating_sub(self.scroll_offset);
-            if s > total { 0 } else { s }
-        } else {
-            total.saturating_sub(height)
-        };
-        let end = total.min(start + height);
-        (start..end).map(|i| self.scrollback[i].clone()).collect()
+    pub fn exit_message(&self) -> Option<&str> {
+        match &self.state {
+            TerminalState::Exited(msg) => Some(msg.as_str()),
+            TerminalState::Running => None,
+        }
     }
 
     pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1).min(self.scrollback.len().saturating_sub(1));
+        let current = self.parser.screen().scrollback();
+        self.parser.set_scrollback(usize::MAX);
+        let max = self.parser.screen().scrollback();
+        self.parser.set_scrollback(current);
+        self.scroll_offset = self.scroll_offset.saturating_add(1).min(max);
     }
 
     pub fn scroll_down(&mut self) {
@@ -96,6 +108,10 @@ impl TerminalInstance {
 
     pub fn reset_scroll(&mut self) {
         self.scroll_offset = 0;
+    }
+
+    pub fn set_size(&mut self, cols: u16, rows: u16) {
+        self.parser.set_size(rows, cols);
     }
 }
 
@@ -116,9 +132,9 @@ impl TerminalPanel {
             focused: false,
             instances: Vec::new(),
             active_idx: 0,
-            position: TerminalPosition::Bottom,
+            position: TerminalPosition::Right,
             height: 12,
-            width: 40,
+            width: 100,
         }
     }
 
@@ -146,7 +162,7 @@ impl TerminalPanel {
     }
 
     pub fn spawn(&mut self, shell: &str, title: &str) {
-        let c = 80u16;
+        let c = self.width.max(10);
         let r = self.height.max(5);
         match TerminalInstance::new(shell, c, r, title.to_string()) {
             Ok(inst) => {
@@ -154,7 +170,7 @@ impl TerminalPanel {
                 self.active_idx = self.instances.len() - 1;
             }
             Err(e) => {
-                eprintln!("Failed to spawn terminal: {}", e);
+                eprintln!("Failed to spawn terminal: {e}");
             }
         }
     }
@@ -226,9 +242,23 @@ impl TerminalPanel {
         }
     }
 
-    pub fn resize_active(&self, cols: u16, rows: u16) {
-        if let Some(inst) = self.instances.get(self.active_idx) {
-            inst.process.resize(cols, rows);
+    pub fn resize_active(&mut self, cols: u16, rows: u16) {
+        if let Some(inst) = self.instances.get_mut(self.active_idx) {
+            let c = cols.max(10);
+            let r = rows.max(1);
+            let (cur_rows, cur_cols) = inst.parser.screen().size();
+            if cur_rows != r || cur_cols != c {
+                inst.process.resize(c, r);
+                inst.set_size(c, r);
+            }
+        }
+    }
+
+    pub fn restart_active(&mut self) -> bool {
+        if let Some(inst) = self.instances.get_mut(self.active_idx) {
+            inst.restart().is_ok()
+        } else {
+            false
         }
     }
 
@@ -239,4 +269,47 @@ impl TerminalPanel {
             TerminalPosition::Top => TerminalPosition::Bottom,
         };
     }
+}
+
+/// Restart the active terminal and attempt to write data to the new session.
+/// Returns `true` if the write succeeded, `false` otherwise.
+pub fn retry_write(panel: &mut TerminalPanel, data: &[u8]) -> bool {
+    if !panel.restart_active() {
+        return false;
+    }
+    panel.active()
+        .map_or(false, |inst| inst.process.write(data).is_ok())
+}
+
+/// Suspend tflow and hand the host terminal to a shell.
+///
+/// The user runs interactive CLI tools (opencode, vim, etc.) directly,
+/// then types `exit` to return to tflow. Works on all platforms.
+pub fn suspend_to_shell() {
+    use std::io::Write;
+    use crossterm::terminal::{LeaveAlternateScreen, EnterAlternateScreen};
+
+    let _ = std::io::stdout().flush();
+    let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = writeln!(
+        std::io::stdout(),
+        "\r\n[Suspended. Type 'exit' to return to tFlow.]\r\n"
+    );
+
+    let shell: String = if cfg!(windows) {
+        "cmd.exe".to_string()
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    };
+
+    let _ = std::process::Command::new(&shell)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+
+    let _ = writeln!(std::io::stdout(), "\r\n[Resuming tFlow...]\r\n");
+    let _ = crossterm::terminal::enable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen);
 }

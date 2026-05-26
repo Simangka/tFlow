@@ -57,8 +57,9 @@ impl Buffer {
 
     pub fn from_path(id: usize, path: PathBuf) -> Result<Self, anyhow::Error> {
         let mut buf = Self::new(id);
-        buf.path = Some(path.clone());
-        buf.name = path
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        buf.path = Some(canonical.clone());
+        buf.name = canonical
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| format!("[{}] Unknown", id));

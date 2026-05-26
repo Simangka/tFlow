@@ -8,11 +8,13 @@ use crate::editor::cursor::Cursor;
 use crate::editor::selection::Selection;
 use crate::workspace::file_tree::TreeDisplayEntry;
 use crate::terminal::renderer::render_vt100_lines;
+use crate::lsp::{LspEvent, LspConfig, LanguageServerConfig};
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph, List, ListItem, Clear, Wrap};
 use ratatui::text::{Span, Line};
 use ratatui::style::{Style, Modifier, Color};
+
 
 /// Suspend TUI input, hand terminal to a shell, then resume.
 /// During the shell the EventStream reader is STOPPED so the child
@@ -51,6 +53,16 @@ impl EventLoop {
         let files = config.files.clone();
         let mut ctx = AppContext::new(config);
 
+        // Initialize LSP channels and spawn manager task
+        let (lsp_cmd_tx, mut lsp_event_rx, lsp_cmd_rx, lsp_event_tx) = crate::lsp::create_lsp_channels();
+        ctx.lsp_tx = Some(lsp_cmd_tx);
+
+        let lsp_lsp_config = LspConfig::default();
+        let lsp_lang_config = LanguageServerConfig::default();
+        tokio::spawn(async move {
+            crate::lsp::run_lsp_manager(lsp_cmd_rx, lsp_event_tx, Some(lsp_lang_config), Some(lsp_lsp_config)).await;
+        });
+
         for file in &files {
             let path = std::path::PathBuf::from(file);
             if path.exists() {
@@ -66,16 +78,35 @@ impl EventLoop {
         }
 
         loop {
+            // Poll for both input and LSP events
             let event = input_handler.recv().await;
             match event {
                 Some(InputEvent::Key(key)) => {
                     if let Err(msg) = Self::handle_key_event(&mut ctx, key, &mut input_handler, &mut input_handle) {
                         ctx.push_error(msg);
                     }
+                    if ctx.editor_mode.mode == EditMode::Insert {
+                        ctx.last_keypress = std::time::Instant::now();
+                        // Don't re-trigger completion for nav/accept keys when popup is showing
+                        let skip_trigger = (ctx.show_completion
+                            && !ctx.completion_items.is_empty()
+                            && matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Tab))
+                            || (!ctx.show_completion && matches!(key.code, KeyCode::Enter | KeyCode::Tab));
+                        if !skip_trigger {
+                            ctx.completion_pending = true;
+                        }
+                    }
                 }
                 Some(InputEvent::Resize(_cols, _rows)) => {}
                 Some(InputEvent::Tick) => {
                     Self::handle_tick(&mut ctx);
+                    // Check completion debounce
+                    if ctx.completion_pending && ctx.lsp_enabled {
+                        let elapsed = ctx.last_keypress.elapsed();
+                        if elapsed >= std::time::Duration::from_millis(80) {
+                            ctx.trigger_completion();
+                        }
+                    }
                 }
                 Some(InputEvent::Mouse(mouse)) => {
                     let terminal_focused = ctx.terminal_panel.visible && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal;
@@ -100,6 +131,11 @@ impl EventLoop {
                 _ => {}
             }
 
+            // Drain pending LSP events (non-blocking, batched)
+            while let Ok(lsp_event) = lsp_event_rx.try_recv() {
+                Self::handle_lsp_event(&mut ctx, lsp_event);
+            }
+
             if ctx.quit_requested {
                 break;
             }
@@ -112,6 +148,64 @@ impl EventLoop {
 
         Self::restore_terminal(&mut terminal)?;
         Ok(())
+    }
+
+    fn handle_lsp_event(ctx: &mut AppContext, event: LspEvent) {
+        match event {
+            LspEvent::Diagnostics { doc_id, diagnostics } => {
+                if doc_id == ctx.active_buffer {
+                    ctx.lsp_diagnostics = diagnostics;
+                }
+            }
+            LspEvent::CompletionResult { doc_id, items, is_incomplete } => {
+                if doc_id == ctx.active_buffer {
+                    ctx.push_info(format!("LSP got {} completions", items.len()));
+                    // Sort: prefix-exact-match first, then prefix-contains, then others
+                    let prefix: String = ctx.buffers.get(ctx.active_buffer)
+                        .map(|b| {
+                            let line = b.get_line(ctx.cursor.position.line);
+                            let col = ctx.cursor.position.column.min(line.len());
+                            line[..col].chars().rev()
+                                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                .collect::<String>()
+                        })
+                        .unwrap_or_default()
+                        .chars().rev().collect();
+                    let mut sorted = items;
+                    if !prefix.is_empty() {
+                        sorted.sort_by(|a, b| {
+                            let a_label = a.insert_text.as_deref().unwrap_or(&a.label).to_lowercase();
+                            let b_label = b.insert_text.as_deref().unwrap_or(&b.label).to_lowercase();
+                            let a_starts = a_label.starts_with(&prefix);
+                            let b_starts = b_label.starts_with(&prefix);
+                            let a_contains = a_label.contains(&prefix);
+                            let b_contains = b_label.contains(&prefix);
+                            match (a_starts, b_starts, a_contains, b_contains) {
+                                (true, false, _, _) => std::cmp::Ordering::Less,
+                                (false, true, _, _) => std::cmp::Ordering::Greater,
+                                (_, _, true, false) => std::cmp::Ordering::Less,
+                                (_, _, false, true) => std::cmp::Ordering::Greater,
+                                _ => a_label.cmp(&b_label),
+                            }
+                        });
+                    }
+                    ctx.completion_items = sorted;
+                    ctx.show_completion = true;
+                    ctx.completion_selected = 0;
+                    let _ = is_incomplete;
+                }
+            }
+            LspEvent::ServerStarted { language, .. } => {
+                ctx.push_info(format!("LSP server started: {}", language));
+            }
+            LspEvent::ServerStopped { language, reason } => {
+                ctx.push_info(format!("LSP server stopped: {} ({})", language, reason));
+            }
+            LspEvent::ServerError { language, error } => {
+                ctx.push_error(format!("LSP [{}]: {}", language, error));
+            }
+            _ => {}
+        }
     }
 
     fn setup_terminal() -> Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, anyhow::Error> {
@@ -465,19 +559,46 @@ impl EventLoop {
             EditMode::Insert => {
                 match key.code {
                     KeyCode::Esc => {
+                        ctx.show_completion = false;
+                        ctx.completion_items.clear();
                         ctx.update_mode(EditMode::Normal);
                         return Ok(());
                     }
+                    KeyCode::Up if ctx.show_completion && !ctx.completion_items.is_empty() => {
+                        ctx.completion_selected = ctx.completion_selected.saturating_sub(1);
+                        return Ok(());
+                    }
+                    KeyCode::Down if ctx.show_completion && !ctx.completion_items.is_empty() => {
+                        let max = ctx.completion_items.len().saturating_sub(1);
+                        ctx.completion_selected = (ctx.completion_selected + 1).min(max);
+                        return Ok(());
+                    }
+                    KeyCode::Enter if ctx.show_completion && !ctx.completion_items.is_empty() => {
+                        ctx.accept_completion();
+                        return Ok(());
+                    }
+                    KeyCode::Tab if ctx.show_completion && !ctx.completion_items.is_empty() => {
+                        ctx.accept_completion();
+                        return Ok(());
+                    }
                     KeyCode::Enter => {
+                        ctx.show_completion = false;
+                        ctx.completion_items.clear();
                         return ctx.handle_action(&Action::InsertNewline);
                     }
                     KeyCode::Backspace => {
+                        ctx.show_completion = false;
+                        ctx.completion_items.clear();
                         return ctx.handle_action(&Action::DeleteBackward);
                     }
                     KeyCode::Delete => {
+                        ctx.show_completion = false;
+                        ctx.completion_items.clear();
                         return ctx.handle_action(&Action::DeleteForward);
                     }
                     KeyCode::Tab => {
+                        ctx.show_completion = false;
+                        ctx.completion_items.clear();
                         return ctx.handle_action(&Action::Indent);
                     }
                     KeyCode::BackTab => {
@@ -490,6 +611,8 @@ impl EventLoop {
                         if c == '\x7f' || c == '\x08' {
                             return ctx.handle_action(&Action::DeleteBackward);
                         }
+                        ctx.show_completion = false;
+                        ctx.completion_items.clear();
                         return ctx.handle_action(&Action::InsertChar(c));
                     }
                     _ => {}
@@ -685,14 +808,30 @@ impl EventLoop {
             } else {
                 String::new()
             };
+            let diag_str = if !ctx.lsp_diagnostics.is_empty() {
+                let errs = ctx.lsp_diagnostics.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)).count();
+                let warns = ctx.lsp_diagnostics.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)).count();
+                if errs > 0 && warns > 0 {
+                    format!(" {}E {}W ", errs, warns)
+                } else if errs > 0 {
+                    format!(" {}E ", errs)
+                } else if warns > 0 {
+                    format!(" {}W ", warns)
+                } else {
+                    format!(" {}D ", ctx.lsp_diagnostics.len())
+                }
+            } else {
+                String::new()
+            };
             let info_str = format!(
-                " {} | {}:{} | {} lines | {}{}{} ",
+                " {} | {}:{} | {} lines | {}{}{}{} ",
                 mode_str,
                 ctx.cursor.position.line + 1,
                 ctx.cursor.position.column + 1,
                 active_buf.line_count(),
                 active_buf.name,
                 search_info,
+                diag_str,
                 pane_info,
             );
 
@@ -1061,6 +1200,57 @@ impl EventLoop {
 
                     frame.render_widget(palette_list, palette_area);
                 }
+            }
+
+            // Completion popup overlay
+            if ctx.show_completion && !ctx.completion_items.is_empty() {
+                let max_h = 10u16.min(ctx.completion_items.len() as u16);
+                let max_w = ctx.completion_items.iter()
+                    .map(|i| i.label.len() as u16 + 6)
+                    .max()
+                    .unwrap_or(20)
+                    .min(60);
+                let popup_x = layout.editor.x + 2;
+                let popup_y = layout.editor.y + 2;
+                let popup_w = max_w.min(frame.area().width.saturating_sub(popup_x));
+                let popup_rect = Rect::new(
+                    popup_x.min(frame.area().width.saturating_sub(popup_w)),
+                    popup_y.min(frame.area().height.saturating_sub(max_h + 2)),
+                    popup_w,
+                    max_h + 2,
+                );
+                frame.render_widget(Clear, popup_rect);
+                let items: Vec<ListItem> = ctx.completion_items.iter().enumerate().map(|(i, item)| {
+                    let is_selected = i == ctx.completion_selected;
+                    let style = if is_selected {
+                        Style::default().fg(ctx.theme.bg).bg(ctx.theme.keyword)
+                    } else {
+                        Style::default().fg(ctx.theme.fg).bg(ctx.theme.cursor_line)
+                    };
+                    let kind_str = match item.kind {
+                        Some(lsp_types::CompletionItemKind::METHOD | lsp_types::CompletionItemKind::FUNCTION) => "fn",
+                        Some(lsp_types::CompletionItemKind::CLASS | lsp_types::CompletionItemKind::STRUCT) => "cl",
+                        Some(lsp_types::CompletionItemKind::MODULE) => "md",
+                        Some(lsp_types::CompletionItemKind::KEYWORD) => "kw",
+                        Some(lsp_types::CompletionItemKind::VARIABLE | lsp_types::CompletionItemKind::FIELD) => "va",
+                        Some(lsp_types::CompletionItemKind::SNIPPET) => "sn",
+                        _ => "  ",
+                    };
+                    let detail = item.detail.as_deref().unwrap_or("");
+                    let label = if detail.is_empty() {
+                        format!(" {}  {}", kind_str, item.label)
+                    } else {
+                        format!(" {}  {}  {}", kind_str, item.label, detail)
+                    };
+                    ListItem::new(Line::from(Span::styled(label, style)))
+                }).collect();
+                let popup_list = List::new(items)
+                    .block(Block::default()
+                        .title(" Completion ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(ctx.theme.keyword)))
+                    .style(Style::default().bg(ctx.theme.cursor_line));
+                frame.render_widget(popup_list, popup_rect);
             }
 
             if ctx.layout.show_markdown_preview {

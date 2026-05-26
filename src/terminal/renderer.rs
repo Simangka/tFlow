@@ -2,177 +2,128 @@ use ratatui::text::{Span, Line};
 use ratatui::style::{Style, Color, Modifier};
 use crate::theme::Theme;
 
-pub fn strip_ansi(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                while let Some(&n) = chars.peek() {
-                    if n == 'm' { chars.next(); break; }
-                    if n.is_ascii_alphabetic() && n != 'm' {
-                        chars.next();
-                        break;
-                    }
-                    chars.next();
-                }
-            } else if *chars.peek().unwrap_or(&'\0') == ']' {
-                chars.next();
-                while let Some(&n) = chars.peek() {
-                    if n == '\x07' || n == '\x1b' {
-                        if n == '\x1b' { break; }
-                        chars.next();
-                        break;
-                    }
-                    chars.next();
-                }
+fn vtcolor_to_ratatui(color: vt100::Color, default: Color) -> Color {
+    match color {
+        vt100::Color::Default => default,
+        vt100::Color::Idx(idx) => Color::Indexed(idx),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+fn vtcell_style(cell: &vt100::Cell, theme: &Theme) -> (Style, Style) {
+    let mut fg = vtcolor_to_ratatui(cell.fgcolor(), theme.fg);
+    let mut bg = vtcolor_to_ratatui(cell.bgcolor(), theme.bg);
+    let mut mods = Modifier::empty();
+    if cell.inverse() { std::mem::swap(&mut fg, &mut bg); }
+    if cell.bold() { mods |= Modifier::BOLD; }
+    if cell.italic() { mods |= Modifier::ITALIC; }
+    if cell.underline() { mods |= Modifier::UNDERLINED; }
+    (Style::default().fg(fg).bg(bg), Style::default().fg(bg).bg(fg).add_modifier(mods))
+}
+
+fn cell_text(cell: &vt100::Cell) -> String {
+    let s = cell.contents();
+    if s.is_empty() { " ".to_string() } else { s }
+}
+
+/// Render terminal screen state into ratatui lines.
+///
+/// Returns (lines, cursor_line, cursor_col) where cursor_line/cursor_col are
+/// the 0-based position within the returned lines array (None if hidden or scrolled).
+pub fn render_vt100_lines(
+    parser: &mut vt100::Parser,
+    height: usize,
+    scroll_offset: usize,
+    theme: &Theme,
+    width: usize,
+    is_focused: bool,
+    exited: bool,
+) -> (Vec<Line<'static>>, Option<(usize, u16)>) {
+    parser.set_scrollback(scroll_offset);
+    let screen = parser.screen();
+    let (rows, cols) = screen.size();
+    let rows = rows as usize;
+
+    let pad_top = if height > rows { height - rows } else { 0 };
+    let screen_start = if height > rows { 0 } else { rows.saturating_sub(height) };
+
+    let mut lines = Vec::with_capacity(height);
+    let bg_fill = Style::default().bg(theme.bg);
+
+    // Pad top with empty lines filled with theme background
+    for _ in 0..pad_top {
+        let span = Span::styled(" ".repeat(width), bg_fill);
+        lines.push(Line::from(span));
+    }
+
+    // Render visible screen rows
+    for r in screen_start..rows {
+        let mut spans: Vec<Span> = Vec::with_capacity(width);
+        for c in 0..width.min(cols as usize) {
+            if let Some(cell) = screen.cell(r as u16, c as u16) {
+                let (style, _rev) = vtcell_style(cell, theme);
+                spans.push(Span::styled(cell_text(cell), style));
+            } else {
+                spans.push(Span::styled(" ", bg_fill));
             }
-        } else if c == '\x07' || c == '\x00' {
-            // skip bell and null
+        }
+        while spans.len() < width {
+            spans.push(Span::styled(" ", bg_fill));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Cursor position (only when not scrolled back, focused, and cursor visible)
+    let cursor = if !exited && scroll_offset == 0 && is_focused && !screen.hide_cursor() {
+        let (cr, cc) = screen.cursor_position();
+        if cr >= screen_start as u16 && cr < rows as u16 {
+            let line_idx = pad_top + (cr - screen_start as u16) as usize;
+            Some((line_idx, cc))
         } else {
-            result.push(c);
+            None
+        }
+    } else {
+        None
+    };
+
+    // Apply cursor: swap fg/bg at cursor position
+    if let Some((cur_line, cur_col)) = cursor {
+        if cur_line < lines.len() {
+            let line = &mut lines[cur_line];
+            let col = cur_col as usize;
+            if col < line.spans.len() {
+                let span = &line.spans[col];
+                // Create reversed style from the span's current style
+                let current_fg = span.style.fg.unwrap_or(theme.fg);
+                let current_bg = span.style.bg.unwrap_or(theme.bg);
+                let cursor_style = Style::default().fg(current_bg).bg(current_fg);
+                line.spans[col] = Span::styled(span.content.clone(), cursor_style);
+            }
         }
     }
-    result
+
+    (lines, cursor)
 }
 
-pub fn parse_ansi_spans(text: &str, theme: &Theme) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut current_style = Style::default().fg(theme.fg).bg(theme.bg);
-    let mut chars = text.chars().peekable();
-    let mut buf = String::new();
+/// Render exit message lines when the shell process has exited.
+pub fn render_exit_message(theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let bg = Style::default().bg(theme.bg);
+    let msg_style = Style::default().fg(theme.comment).bg(theme.bg);
+    let msg = format!(" Process exited. [close tab] ");
+    let msg_len = msg.len();
 
-    macro_rules! flush {
-        () => {
-            if !buf.is_empty() {
-                let content: String = std::mem::take(&mut buf);
-                spans.push(Span::styled(content, current_style));
-            }
-        };
+    let mut lines: Vec<Line> = (0..1).map(|_| {
+        Line::from(Span::styled(" ".repeat(width), bg))
+    }).collect();
+
+    if width > msg_len {
+        let pad_left = (width.saturating_sub(msg_len)) / 2;
+        let mut spans = vec![Span::styled(" ".repeat(pad_left), bg)];
+        spans.push(Span::styled(msg, msg_style));
+        let remaining = width.saturating_sub(pad_left + msg_len);
+        spans.push(Span::styled(" ".repeat(remaining), bg));
+        lines.push(Line::from(spans));
     }
 
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            flush!();
-            chars.next();
-            let mut params = String::new();
-            while let Some(&n) = chars.peek() {
-                if n == 'm' { chars.next(); break; }
-                params.push(n);
-                chars.next();
-            }
-            current_style = apply_sgr(&params, current_style, theme);
-        } else if c == '\x07' || c == '\x00' {
-            // skip
-        } else {
-            buf.push(c);
-        }
-    }
-    flush!();
-
-    if spans.is_empty() {
-        let cleaned = strip_ansi(text);
-        spans.push(Span::styled(cleaned, Style::default().fg(theme.fg)));
-    }
-
-    spans
-}
-
-fn apply_sgr(params: &str, mut style: Style, theme: &Theme) -> Style {
-    if params.is_empty() || params == "0" {
-        return Style::default().fg(theme.fg).bg(theme.bg);
-    }
-
-    for param in params.split(';') {
-        match param {
-            "0" | "" => style = Style::default().fg(theme.fg).bg(theme.bg),
-            "1" => style = style.add_modifier(Modifier::BOLD),
-            "3" => style = style.add_modifier(Modifier::ITALIC),
-            "4" => style = style.add_modifier(Modifier::UNDERLINED),
-            "7" => style = style.add_modifier(Modifier::REVERSED),
-            "22" => style = style.remove_modifier(Modifier::BOLD),
-            "23" => style = style.remove_modifier(Modifier::ITALIC),
-            "24" => style = style.remove_modifier(Modifier::UNDERLINED),
-            "27" => style = style.remove_modifier(Modifier::REVERSED),
-            "30" | "90" => style = style.fg(Color::Black),
-            "31" | "91" => style = style.fg(Color::Red),
-            "32" | "92" => style = style.fg(Color::Green),
-            "33" | "93" => style = style.fg(Color::Yellow),
-            "34" | "94" => style = style.fg(Color::Blue),
-            "35" | "95" => style = style.fg(Color::Magenta),
-            "36" | "96" => style = style.fg(Color::Cyan),
-            "37" | "97" => style = style.fg(Color::White),
-            "39" => style = style.fg(theme.fg),
-            "40" | "100" => style = style.bg(Color::Black),
-            "41" | "101" => style = style.bg(Color::Red),
-            "42" | "102" => style = style.bg(Color::Green),
-            "43" | "103" => style = style.bg(Color::Yellow),
-            "44" | "104" => style = style.bg(Color::Blue),
-            "45" | "105" => style = style.bg(Color::Magenta),
-            "46" | "106" => style = style.bg(Color::Cyan),
-            "47" | "107" => style = style.bg(Color::White),
-            "49" => style = style.bg(theme.bg),
-            // 256-color: 38;5;N or 48;5;N
-            p if p.starts_with("38;5;") || p.starts_with("48;5;") => {
-                // Handled by the split logic below for 256-color
-            }
-            // truecolor: 38;2;R;G;B or 48;2;R;G;B
-            p if p.starts_with("38;2;") || p.starts_with("48;2;") => {
-                // Handled below
-            }
-            _ => {}
-        }
-    }
-
-    // Handle 256-color and truecolor (the params may contain them as separate args)
-    // This is a simplification; full parsing would need to look at semicolons differently
-    if params.contains("38;5;") || params.contains("48;5;") {
-        let parts: Vec<&str> = params.split(';').collect();
-        for i in 0..parts.len() {
-            if parts[i] == "38" && i + 2 < parts.len() && parts[i+1] == "5" {
-                if let Ok(c) = parts[i+2].parse::<u8>() {
-                    style = style.fg(Color::Indexed(c));
-                }
-            }
-            if parts[i] == "48" && i + 2 < parts.len() && parts[i+1] == "5" {
-                if let Ok(c) = parts[i+2].parse::<u8>() {
-                    style = style.bg(Color::Indexed(c));
-                }
-            }
-        }
-    }
-    if params.contains("38;2;") || params.contains("48;2;") {
-        let parts: Vec<&str> = params.split(';').collect();
-        for i in 0..parts.len() {
-            if parts[i] == "38" && i + 4 < parts.len() && parts[i+1] == "2" {
-                if let (Ok(r), Ok(g), Ok(b)) = (
-                    parts[i+2].parse::<u8>(),
-                    parts[i+3].parse::<u8>(),
-                    parts[i+4].parse::<u8>(),
-                ) {
-                    style = style.fg(Color::Rgb(r, g, b));
-                }
-            }
-            if parts[i] == "48" && i + 4 < parts.len() && parts[i+1] == "2" {
-                if let (Ok(r), Ok(g), Ok(b)) = (
-                    parts[i+2].parse::<u8>(),
-                    parts[i+3].parse::<u8>(),
-                    parts[i+4].parse::<u8>(),
-                ) {
-                    style = style.bg(Color::Rgb(r, g, b));
-                }
-            }
-        }
-    }
-
-    style
-}
-
-pub fn render_terminal_lines(lines: &[String], theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    lines.iter().map(|line| {
-        let cleaned = strip_ansi(line);
-        let truncated: String = cleaned.chars().take(width).collect();
-        Line::from(Span::styled(truncated, Style::default().fg(theme.fg)))
-    }).collect()
+    lines
 }

@@ -1,1 +1,6 @@
 /target
+test.py
+did_open_called.txt
+*.exe
+*.db
+
