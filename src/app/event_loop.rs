@@ -9,7 +9,7 @@ use crate::editor::selection::Selection;
 use crate::workspace::file_tree::TreeDisplayEntry;
 use crate::terminal::renderer::render_vt100_lines;
 use crate::lsp::{LspEvent, LspConfig, LanguageServerConfig};
-use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use crossterm::event::{KeyEvent, KeyCode, KeyModifiers, MouseButton};
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph, List, ListItem, Clear, Wrap};
 use ratatui::text::{Span, Line};
@@ -109,23 +109,66 @@ impl EventLoop {
                     }
                 }
                 Some(InputEvent::Mouse(mouse)) => {
-                    let terminal_focused = ctx.terminal_panel.visible && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal;
-                    match mouse.kind {
-                        crossterm::event::MouseEventKind::ScrollDown => {
-                            if terminal_focused {
-                                ctx.terminal_panel.scroll_down();
-                            } else {
-                                ctx.handle_action(&Action::MoveDown).ok();
-                            }
+                    // When the terminal pane is in alternate screen mode (opencode,
+                    // vim, htop, less, ...) the TUI has its own mouse handling.
+                    // Forward the event to the PTY in xterm's default mouse encoding
+                    // (CSI M Cb Cx Cy) so the TUI can scroll / click / select natively.
+                    // Without this, scrolling in opencode does nothing because we
+                    // capture the wheel at the tFlow layer and never send it through.
+                    let in_alt_screen = ctx.terminal_panel.active()
+                        .map(|inst| inst.parser.screen().alternate_screen())
+                        .unwrap_or(false);
+
+                    if in_alt_screen && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal {
+                        let cb: u8 = match mouse.kind {
+                            crossterm::event::MouseEventKind::Down(MouseButton::Left) => 0,
+                            crossterm::event::MouseEventKind::Down(MouseButton::Middle) => 1,
+                            crossterm::event::MouseEventKind::Down(MouseButton::Right) => 2,
+                            crossterm::event::MouseEventKind::Up(MouseButton::Left) => 3,
+                            crossterm::event::MouseEventKind::Up(MouseButton::Middle) => 4,
+                            crossterm::event::MouseEventKind::Up(MouseButton::Right) => 5,
+                            crossterm::event::MouseEventKind::Drag(MouseButton::Left) => 32,
+                            crossterm::event::MouseEventKind::Drag(MouseButton::Middle) => 33,
+                            crossterm::event::MouseEventKind::Drag(MouseButton::Right) => 34,
+                            crossterm::event::MouseEventKind::ScrollUp => 64,
+                            crossterm::event::MouseEventKind::ScrollDown => 65,
+                            crossterm::event::MouseEventKind::ScrollLeft => 66,
+                            crossterm::event::MouseEventKind::ScrollRight => 67,
+                            _ => 255, // unknown — skip
+                        };
+                        if cb != 255 {
+                            // xterm default encoding: 1-based col/row, each offset by 32.
+                            let cx = mouse.column.saturating_add(1).saturating_add(32);
+                            let cy = mouse.row.saturating_add(1).saturating_add(32);
+                            let mut seq = [0u8; 6];
+                            seq[0] = 0x1b; seq[1] = b'['; seq[2] = b'M';
+                            seq[3] = cb.saturating_add(32);
+                            seq[4] = (cx as u8).min(255);
+                            seq[5] = (cy as u8).min(255);
+                            ctx.terminal_panel.write_active(&seq).ok();
                         }
-                        crossterm::event::MouseEventKind::ScrollUp => {
-                            if terminal_focused {
-                                ctx.terminal_panel.scroll_up();
-                            } else {
-                                ctx.handle_action(&Action::MoveUp).ok();
+                    } else {
+                        // Normal (non-alt-screen) terminal: use the wheel for
+                        // terminal scrollback or editor viewport scroll.
+                        match mouse.kind {
+                            crossterm::event::MouseEventKind::ScrollDown => {
+                                if ctx.terminal_panel.visible {
+                                    ctx.terminal_panel.scroll_down();
+                                } else {
+                                    // Scroll the editor viewport, don't move the cursor
+                                    // (MoveDown would just step the cursor one line).
+                                    ctx.handle_action(&Action::PageDown).ok();
+                                }
                             }
+                            crossterm::event::MouseEventKind::ScrollUp => {
+                                if ctx.terminal_panel.visible {
+                                    ctx.terminal_panel.scroll_up();
+                                } else {
+                                    ctx.handle_action(&Action::PageUp).ok();
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
                 _ => {}
@@ -212,7 +255,11 @@ impl EventLoop {
         crossterm::terminal::enable_raw_mode()?;
         let mut stdout = std::io::stdout();
         crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-        let _ = crossterm::execute!(stdout, crossterm::event::DisableMouseCapture);
+        // Enable mouse capture so wheel events come to us (and we can scroll the
+        // integrated terminal) instead of falling through to the PTY as raw ANSI
+        // sequences — which Windows Terminal happily translates to Up/Down and
+        // hands to the running TUI (opencode, vim, etc.) as input history nav.
+        let _ = crossterm::execute!(stdout, crossterm::event::EnableMouseCapture);
         let backend = ratatui::backend::CrosstermBackend::new(stdout);
         let mut terminal = ratatui::Terminal::new(backend)?;
         terminal.hide_cursor()?;
@@ -429,10 +476,17 @@ impl EventLoop {
                     return Ok(());
                 }
                 KeyCode::F(12) => {
-                    // Restart the PTY shell so it's fresh on return
-                    ctx.terminal_panel.restart_active();
-                    // Suspend with exclusive stdin access
-                    suspend_to_external(input_handler, input_handle);
+                    // F12 toggles the terminal panel (consistent with the global
+                    // binding). Previously this did restart_active() + suspend_to_external()
+                    // which killed the running child (opencode, vim, …) and dropped
+                    // the user into a host shell — not what the README documents and
+                    // not what users expect from a "toggle" key.
+                    ctx.terminal_panel.toggle();
+                    ctx.layout.show_terminal = ctx.terminal_panel.visible;
+                    if !ctx.terminal_panel.visible {
+                        ctx.terminal_panel.unfocus();
+                        ctx.layout.focused_pane = crate::ui::layout::FocusedPane::Editor;
+                    }
                     return Ok(());
                 }
                 _ => {
@@ -466,6 +520,42 @@ impl EventLoop {
                     }
                     return Ok(());
                 }
+            }
+        }
+
+        // Terminal visible but not focused: still allow scroll keys so the user can
+        // inspect output without having to click into the pane first. Only intercept
+        // the dedicated scroll keys — everything else falls through to the editor
+        // (or wherever the focus actually is).
+        if ctx.terminal_panel.visible && ctx.layout.focused_pane != crate::ui::layout::FocusedPane::Terminal {
+            match key.code {
+                KeyCode::PageUp => {
+                    ctx.terminal_panel.scroll_up();
+                    return Ok(());
+                }
+                KeyCode::PageDown => {
+                    ctx.terminal_panel.scroll_down();
+                    return Ok(());
+                }
+                KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
+                    ctx.terminal_panel.scroll_up();
+                    return Ok(());
+                }
+                KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
+                    ctx.terminal_panel.scroll_down();
+                    return Ok(());
+                }
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    let half = (ctx.terminal_panel.height as usize / 2).max(1);
+                    for _ in 0..half { ctx.terminal_panel.scroll_up(); }
+                    return Ok(());
+                }
+                KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                    let half = (ctx.terminal_panel.height as usize / 2).max(1);
+                    for _ in 0..half { ctx.terminal_panel.scroll_down(); }
+                    return Ok(());
+                }
+                _ => {}
             }
         }
 
@@ -538,12 +628,12 @@ impl EventLoop {
             }
         }
 
-        // Global F12: suspend to shell (works from any pane)
+        // F12: explicit toggle of the integrated terminal. The keymap has a binding
+        // for this too, but we handle it here directly as a safety net so the key
+        // always works (F12 is sometimes intercepted by host terminals / Windows
+        // accessibility shortcuts before it reaches our keymap).
         if key.code == KeyCode::F(12) {
-            if ctx.terminal_panel.visible {
-                ctx.terminal_panel.restart_active();
-                suspend_to_external(input_handler, input_handle);
-            }
+            ctx.handle_action(&Action::ToggleTerminal).ok();
             return Ok(());
         }
 
@@ -656,17 +746,6 @@ impl EventLoop {
 
     fn handle_tick(ctx: &mut AppContext) {
         ctx.tick();
-
-        // Auto-restart the terminal if it's in Exited state while visible.
-        // On the next render the fresh shell prompt will appear, so the user
-        // doesn't need to press a key to restart.
-        if ctx.terminal_panel.visible {
-            if let Some(inst) = ctx.terminal_panel.active() {
-                if !inst.is_running() {
-                    ctx.terminal_panel.restart_active();
-                }
-            }
-        }
     }
 
     fn render(terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, ctx: &mut AppContext) -> Result<(), anyhow::Error> {
@@ -1345,7 +1424,7 @@ impl EventLoop {
 fn encode_key(key: KeyEvent) -> String {
     use crossterm::event::KeyCode;
     match key.code {
-        KeyCode::Enter => "\r\n".to_string(),
+        KeyCode::Enter => "\r".to_string(),
         KeyCode::Tab => "\t".to_string(),
         KeyCode::Backspace => "\x7f".to_string(),
         KeyCode::Esc => "\x1b".to_string(),

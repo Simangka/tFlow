@@ -25,6 +25,7 @@ pub enum TerminalState {
 pub struct TerminalInstance {
     pub process: TerminalProcess,
     pub rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub redraw_rx: mpsc::UnboundedReceiver<()>,
     pub parser: vt100::Parser,
     pub title: String,
     pub scroll_offset: usize,
@@ -34,10 +35,11 @@ pub struct TerminalInstance {
 
 impl TerminalInstance {
     fn new(shell: &str, cols: u16, rows: u16, title: String) -> Result<Self, String> {
-        let (process, rx) = TerminalProcess::spawn(shell, cols, rows)?;
+        let (process, rx, redraw_rx) = TerminalProcess::spawn(shell, cols, rows)?;
         Ok(TerminalInstance {
             process,
             rx,
+            redraw_rx,
             parser: vt100::Parser::new(rows.max(1), cols.max(10), MAX_SCROLLBACK),
             title,
             scroll_offset: 0,
@@ -50,9 +52,10 @@ impl TerminalInstance {
         let (cur_rows, cur_cols) = self.parser.screen().size();
         let cols = cur_cols.max(10);
         let rows = cur_rows.max(1);
-        let (process, rx) = TerminalProcess::spawn(&self.shell, cols, rows)?;
+        let (process, rx, redraw_rx) = TerminalProcess::spawn(&self.shell, cols, rows)?;
         self.process = process;
         self.rx = rx;
+        self.redraw_rx = redraw_rx;
         self.parser = vt100::Parser::new(rows, cols, MAX_SCROLLBACK);
         self.state = TerminalState::Running;
         self.scroll_offset = 0;
@@ -60,27 +63,78 @@ impl TerminalInstance {
     }
 
     pub fn drain_output(&mut self) {
+        // Handle redraw notifications from the reader thread. These fire when the
+        // ConPTY pipe was broken for a meaningful duration and then recovered — a
+        // strong signal that a child TUI process (opencode, vim, less, htop, ...)
+        // has just exited. Some TUI apps / ConPTY combinations fail to emit the
+        // "exit alternate screen" sequence on exit, which leaves the parser stuck
+        // showing the TUI's last frame while the shell prompt sits hidden in the
+        // main screen buffer. Inject the reset sequences so the prompt reappears
+        // immediately (no need to mash Enter).
+        while let Ok(()) = self.redraw_rx.try_recv() {
+            // CSI ? 1049 l — switch from alternate screen buffer to normal screen
+            self.parser.process(b"\x1b[?1049l");
+            // CSI ? 25 h — show cursor (some TUIs hide it on exit)
+            self.parser.process(b"\x1b[?25h");
+        }
+
+        // Process at most a few chunks per drain so the renderer sees each
+        // intermediate parser state. A normal terminal emulator paints after
+        // every batch of bytes it receives; if we drain everything in one shot
+        // the user only ever sees the final state, which means TUIs that print
+        // a brief menu/banner before entering the alternate screen (opencode's
+        // session picker, for example) flash by invisibly. Capping to ~3 chunks
+        // per drain means the menu survives long enough on screen to be read.
+        const MAX_CHUNKS_PER_DRAIN: usize = 3;
+        let mut chunks_processed: usize = 0;
+
         loop {
+            if chunks_processed >= MAX_CHUNKS_PER_DRAIN {
+                break;
+            }
             match self.rx.try_recv() {
-                Ok(bytes) if bytes.is_empty() => {
-                    self.parser.process(b"\x1b[?1049l\x1b[?25h");
+                Ok(bytes) => {
+                    if !bytes.is_empty() {
+                        self.parser.process(&bytes);
+                        chunks_processed += 1;
+                    }
                 }
-                Ok(bytes) => self.parser.process(&bytes),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    // Reader thread exited because the PTY pipe was
-                    // broken — the shell process has truly exited.
-                    // Do NOT use try_wait() here because on ConPTY v2
-                    // it can fire prematurely when a subprocess exits.
                     if matches!(self.state, TerminalState::Running) {
-                        self.state = TerminalState::Exited("[shell exited]".to_string());
+                        self.state = TerminalState::Exited("[shell exited — press Enter to restart]".to_string());
                         self.process.close();
+                        // Force-exit alt screen so the user doesn't see a frozen
+                        // TUI frame on top of an empty main screen. This handles
+                        // the case where the child exited cleanly without sending
+                        // the "leave alternate screen" sequence (ConPTY edge case).
+                        // We deliberately do NOT clear the main screen here —
+                        // wiping the screen would also wipe any output the
+                        // previous shell session produced, which is much more
+                        // disorienting than a frozen TUI frame.
+                        if self.parser.screen().alternate_screen() {
+                            self.parser.process(b"\x1b[?1049l");
+                            self.parser.process(b"\x1b[?25h");
+                        }
                         self.reset_scroll();
                     }
                     break;
                 }
             }
         }
+
+        // NOTE: an earlier draft had an idle-timeout fallback here that
+        // force-exited the alt screen after ~600ms of silence. That turned out
+        // to be far too aggressive: an active TUI waiting for user input
+        // (opencode, vim, htop, …) is silent for many seconds at a time, and
+        // the force-exit would interrupt it, the TUI would immediately
+        // re-enter alt screen, and we'd loop — producing a jumbled
+        // main-screen / alt-screen flicker for the user.
+        //
+        // The right signal for "TUI has exited" is the pipe-break redraw
+        // notification above (drained at the top of this function) and the
+        // Disconnected branch in the rx loop. If the child exits cleanly
+        // without breaking the pipe the user can press any key to nudge it.
     }
 
     pub fn is_running(&self) -> bool {

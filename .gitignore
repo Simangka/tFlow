@@ -3,4 +3,6 @@ test.py
 did_open_called.txt
 *.exe
 *.db
+QAreport.md
+stack.md
 

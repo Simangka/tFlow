@@ -13,7 +13,18 @@ pub struct TerminalProcess {
 }
 
 impl TerminalProcess {
-    pub fn spawn(shell: &str, cols: u16, rows: u16) -> Result<(Self, mpsc::UnboundedReceiver<Vec<u8>>), String> {
+    pub fn spawn(
+        shell: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<
+        (
+            Self,
+            mpsc::UnboundedReceiver<Vec<u8>>,
+            mpsc::UnboundedReceiver<()>,
+        ),
+        String,
+    > {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| format!("PTY: {}", e))?;
@@ -35,9 +46,10 @@ impl TerminalProcess {
         let master = Arc::new(Mutex::new(pair.master));
         let child = Arc::new(Mutex::new(Some(child)));
         let (tx, rx) = mpsc::unbounded_channel();
+        let (redraw_tx, redraw_rx) = mpsc::unbounded_channel();
 
         let master_clone = master.clone();
-        let child_clone = child.clone();
+        let redraw_tx_clone = redraw_tx.clone();
         std::thread::spawn(move || {
             let mut r = match master_clone.lock().try_clone_reader() {
                 Ok(r) => r,
@@ -47,54 +59,56 @@ impl TerminalProcess {
                 }
             };
             let mut buf = vec![0u8; 16384];
-            let mut drained = false;
             let mut zero_count: u32 = 0;
             let mut zero_start: Option<Instant> = None;
+            let mut pipe_was_broken = false;
             loop {
                 match r.read(&mut buf) {
                     Ok(0) => {
-                        // First Ok(0) = ConPTY flush signal.
-                        if !drained {
-                            drained = true;
-                            zero_count = 0;
-                            zero_start = None;
-                            if tx.send(vec![]).is_err() { break; }
-                            continue;
-                        }
-                        // Subsequent Ok(0)s = potential pipe break (ConPTY v2
-                        // terminates the anonymous pipe on subprocess exit).
+                        // ConPTY pipe broken (child process exited).
+                        pipe_was_broken = true;
                         zero_count += 1;
                         if zero_start.is_none() {
                             zero_start = Some(Instant::now());
                         }
 
-                        // Hard timeout: if the pipe has been broken for
-                        // >30s without any data, force a restart regardless
-                        // of whether the shell is alive.
-                        if zero_start.map_or(false, |t| t.elapsed() > Duration::from_secs(30)) {
+                        // Hard timeout: pipe broken too long → force break.
+                        if zero_start.map_or(false, |t| t.elapsed() > Duration::from_secs(5)) {
                             break;
                         }
 
-                        // Liveness check (~10s): see if the shell truly exited.
-                        if zero_count >= 100 {
-                            let really_gone = child_clone.lock()
-                                .as_mut()
-                                .and_then(|c| c.try_wait().ok()?)
-                                .is_some();
-                            if really_gone {
-                                break; // shell exited — permanent break
-                            }
-                            // Shell is still alive — the pipe may recover.
-                            // Keep zero_start so the hard timeout keeps ticking.
-                            zero_count = 0;
-                            drained = false;
-                        }
+                        // NOTE: an earlier draft had a `try_wait()` liveness
+                        // check here that broke out of the loop as soon as
+                        // ConPTY reported the shell as exited. On Windows,
+                        // ConPTY has a habit of briefly reporting the parent
+                        // shell (cmd.exe) as exited when a child TUI (opencode,
+                        // vim, …) shuts down — even though the shell is still
+                        // alive and ready to accept more commands. Breaking
+                        // out of the loop in that case would show a misleading
+                        // "[shell exited]" message and force the user to
+                        // restart the shell. We now rely solely on the hard
+                        // 5-second timeout above, which is long enough to
+                        // ride out ConPTY's transient exit reports but short
+                        // enough that a truly dead shell is still detected
+                        // quickly.
 
-                        if tx.send(vec![]).is_err() { break; }
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Ok(n) => {
-                        drained = false;
+                        if pipe_was_broken {
+                            // Check whether the break was long enough to indicate a real
+                            // child process exit (filtering out momentary ConPTY quirks).
+                            let break_duration = zero_start
+                                .map_or(Duration::ZERO, |t| t.elapsed());
+                            if break_duration > Duration::from_millis(200) {
+                                // Pipe recovered after a meaningful break — most likely a
+                                // child TUI process (opencode, vim, less, etc.) just exited.
+                                // Signal the panel to force-exit the alternate screen buffer
+                                // so the shell prompt becomes visible immediately.
+                                let _ = redraw_tx_clone.send(());
+                            }
+                            pipe_was_broken = false;
+                        }
                         zero_count = 0;
                         zero_start = None;
                         let data = buf[..n].to_vec();
@@ -114,7 +128,7 @@ impl TerminalProcess {
             master,
             _slave: Some(pair.slave),
             child,
-        }, rx))
+        }, rx, redraw_rx))
     }
 
     pub fn write(&self, data: &[u8]) -> Result<(), String> {
