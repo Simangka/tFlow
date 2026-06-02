@@ -40,12 +40,14 @@ pub fn render(
     frame: &mut Frame,
     area: Rect,
     blame_data: &[Option<BlameInfo>],
-    _visible_start: usize,
+    visible_start: usize,
     theme: &Theme,
 ) {
     if blame_data.is_empty() { return; }
     let mut lines = Vec::new();
-    for (_i, bline) in blame_data.iter().enumerate() {
+    let start = visible_start.min(blame_data.len());
+    let end = (start + area.height as usize).min(blame_data.len());
+    for bline in &blame_data[start..end] {
         let text = match bline {
             Some(info) => {
                 let author = author_short(&info.author);

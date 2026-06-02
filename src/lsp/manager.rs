@@ -6,23 +6,23 @@ use crate::lsp::rpc::{RpcReader, RpcMessage};
 use crate::lsp::types::*;
 use lsp_types::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
 struct ServerConnection {
     client: LanguageClient,
     reader_rx: mpsc::UnboundedReceiver<RpcMessage>,
-    process: tokio::process::Child,
+    kill_tx: Option<oneshot::Sender<()>>,
 }
 
 pub struct LspManager {
     servers: HashMap<LanguageId, ServerConnection>,
     server_for_document: HashMap<DocumentId, LanguageId>,
     config: LanguageServerConfig,
-    lsp_config: LspConfig,
+    _lsp_config: LspConfig,
     cache: Arc<LspCache>,
     completion_handler: CompletionHandler,
     diagnostics_handler: DiagnosticsHandler,
@@ -45,7 +45,7 @@ impl LspManager {
             servers: HashMap::new(),
             server_for_document: HashMap::new(),
             config,
-            lsp_config,
+            _lsp_config: lsp_config,
             cache,
             completion_handler,
             diagnostics_handler,
@@ -81,7 +81,9 @@ impl LspManager {
 
         for (_, mut conn) in self.servers.drain() {
             conn.client.send_shutdown().await;
-            let _ = conn.process.kill().await;
+            if let Some(kill_tx) = conn.kill_tx.take() {
+                let _ = kill_tx.send(());
+            }
         }
     }
 
@@ -147,6 +149,7 @@ impl LspManager {
 
     async fn start_server(&mut self, language: &str, workspace_root: Option<PathBuf>) -> Result<(), String> {
         if self.servers.contains_key(language) {
+            tracing::info!(language = %language, "LSP server already running");
             return Ok(());
         }
 
@@ -156,15 +159,29 @@ impl LspManager {
 
         tracing::info!(language = %language, "Starting server: {} {}", server_def.command, server_def.args.join(" "));
 
+        let resolved_exe = if cfg!(windows) {
+            let (exe, _args) = resolve_windows_command(&server_def.command, &server_def.args);
+            PathBuf::from(exe)
+        } else {
+            let cmd_path = std::path::PathBuf::from(&server_def.command);
+            if cmd_path.is_absolute() {
+                cmd_path
+            } else {
+                resolve_in_path(&server_def.command).unwrap_or(cmd_path)
+            }
+        };
+
+        if let Err(e) = validate_server_path(&resolved_exe) {
+            return Err(format!("Refusing to start LSP server: {}", e));
+        }
+
         let mut cmd = if cfg!(windows) {
-            // On Windows, .cmd wrappers don't work well with piped stdio.
-            // Resolve to the actual executable if possible.
             let (exe, args) = resolve_windows_command(&server_def.command, &server_def.args);
             let mut c = Command::new(&exe);
             c.args(&args);
             c
         } else {
-            let mut c = Command::new(&server_def.command);
+            let mut c = Command::new(&resolved_exe);
             c.args(&server_def.args);
             c
         };
@@ -190,6 +207,37 @@ impl LspManager {
         let (reader_tx, reader_rx) = mpsc::unbounded_channel();
         let lang = language.to_string();
         let lang2 = lang.clone();
+        let (kill_tx, kill_rx) = oneshot::channel();
+
+        let event_tx_for_supervisor = self.event_tx.clone();
+        let lang_for_supervisor = lang.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                result = child.wait() => {
+                    match result {
+                        Ok(status) => {
+                            tracing::warn!(language = %lang_for_supervisor, status = ?status, "LSP server exited");
+                            let _ = event_tx_for_supervisor.send(LspEvent::ServerStopped {
+                                language: lang_for_supervisor,
+                                reason: format!("Process exited with status {:?}", status),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(language = %lang_for_supervisor, error = %e, "LSP server wait error");
+                            let _ = event_tx_for_supervisor.send(LspEvent::ServerError {
+                                language: lang_for_supervisor,
+                                error: format!("Wait error: {}", e),
+                            });
+                        }
+                    }
+                }
+                _ = kill_rx => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    tracing::info!(language = %lang_for_supervisor, "LSP server killed");
+                }
+            }
+        });
 
         tokio::spawn(async move {
             crate::lsp::rpc::read_stderr(stderr, lang).await;
@@ -227,7 +275,7 @@ impl LspManager {
         self.servers.insert(language.to_string(), ServerConnection {
             client,
             reader_rx,
-            process: child,
+            kill_tx: Some(kill_tx),
         });
 
         Ok(())
@@ -236,8 +284,9 @@ impl LspManager {
     async fn stop_server(&mut self, language: &str) -> Result<(), String> {
         if let Some(mut conn) = self.servers.remove(language) {
             conn.client.send_shutdown().await;
-            let _ = conn.process.kill().await;
-            let _ = conn.process.wait().await;
+            if let Some(kill_tx) = conn.kill_tx.take() {
+                let _ = kill_tx.send(());
+            }
             tracing::info!(language = %language, "Server stopped");
         }
         Ok(())
@@ -274,12 +323,9 @@ impl LspManager {
         Ok(())
     }
 
-    async fn handle_did_change(&mut self, doc_id: DocumentId, _version: i32, changes: Vec<TextDocumentContentChangeEvent>) -> Result<(), String> {
+    async fn handle_did_change(&mut self, doc_id: DocumentId, version: i32, changes: Vec<TextDocumentContentChangeEvent>) -> Result<(), String> {
         self.drain_reader_messages().await;
         if let Some(client) = self.get_client_mut(doc_id) {
-            let version = client.get_document(doc_id)
-                .map(|d| d.version + 1)
-                .unwrap_or(1);
             client.send_did_change(doc_id, version, changes).await;
         }
         Ok(())
@@ -430,4 +476,37 @@ fn resolve_windows_command(command: &str, original_args: &[String]) -> (String, 
 #[cfg(not(windows))]
 fn resolve_windows_command(command: &str, original_args: &[String]) -> (String, Vec<String>) {
     (command.to_string(), original_args.to_vec())
+}
+
+fn resolve_in_path(cmd: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(cmd);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if cfg!(windows) {
+            for ext in &["exe", "cmd", "bat", "com"] {
+                let with_ext = dir.join(format!("{}.{}", cmd, ext));
+                if with_ext.is_file() {
+                    return Some(with_ext);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn validate_server_path(resolved: &Path) -> Result<(), String> {
+    let cwd = std::env::current_dir().ok();
+    if let Some(cwd) = cwd.as_ref() {
+        if resolved.starts_with(cwd) {
+            return Err(format!("refusing to launch LSP server from cwd: {:?}", resolved));
+        }
+    }
+    let temp = std::env::temp_dir();
+    if resolved.starts_with(&temp) {
+        return Err(format!("refusing to launch LSP server from temp dir: {:?}", resolved));
+    }
+    Ok(())
 }

@@ -11,36 +11,50 @@ pub struct JumpTarget {
     pub origin_range: Option<Range>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum DefinitionResponse {
+    Single(Location),
+    Multiple(Vec<Location>),
+    Links(Vec<LocationLink>),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ReferencesResponse {
+    Single(Location),
+    Multiple(Vec<Location>),
+}
+
 impl GotoHandler {
     pub fn process_definition_response(
         result: serde_json::Value,
     ) -> Vec<LocationLink> {
-        if let Ok(single) = serde_json::from_value::<Location>(result.clone()) {
-            return vec![convert_location_to_link(single)];
-        }
-        if let Ok(multiple) = serde_json::from_value::<Vec<Location>>(result.clone()) {
-            return multiple.into_iter()
+        match serde_json::from_value::<DefinitionResponse>(result) {
+            Ok(DefinitionResponse::Single(loc)) => vec![convert_location_to_link(loc)],
+            Ok(DefinitionResponse::Multiple(locs)) => locs
+                .into_iter()
                 .map(convert_location_to_link)
-                .collect();
+                .collect(),
+            Ok(DefinitionResponse::Links(links)) => links,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to parse definition response");
+                vec![]
+            }
         }
-        if let Ok(links) = serde_json::from_value::<Vec<LocationLink>>(result) {
-            return links;
-        }
-        tracing::warn!("Failed to parse definition response");
-        vec![]
     }
 
     pub fn process_references_response(
         result: serde_json::Value,
     ) -> Vec<Location> {
-        if let Ok(single) = serde_json::from_value::<Location>(result.clone()) {
-            return vec![single];
+        match serde_json::from_value::<ReferencesResponse>(result) {
+            Ok(ReferencesResponse::Single(loc)) => vec![loc],
+            Ok(ReferencesResponse::Multiple(locs)) => locs,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to parse references response");
+                vec![]
+            }
         }
-        if let Ok(multiple) = serde_json::from_value::<Vec<Location>>(result) {
-            return multiple;
-        }
-        tracing::warn!("Failed to parse references response");
-        vec![]
     }
 
     pub fn jump_target_to_location(target: &JumpTarget) -> Location {

@@ -3,6 +3,14 @@ use regex::Regex;
 use ignore::WalkBuilder;
 use crate::workspace::SearchResult;
 
+const MAX_SEARCH_FILE_SIZE: u64 = 10 * 1024 * 1024;
+const SKIP_EXTENSIONS: &[&str] = &[
+    "exe", "dll", "so", "bin", "png", "jpg", "jpeg", "zip", "tar", "gz", "bz2", "xz", "7z",
+    "lock", "ico", "gif", "bmp", "pdf", "mp3", "mp4", "mov", "avi", "mkv", "webp", "wasm",
+    "o", "a", "lib", "obj", "class", "jar", "pyc", "pyd", "ttf", "otf", "woff", "woff2",
+    "iso", "img", "deb", "rpm", "dmg", "swf", "flv", "ogg", "wav", "flac", "aac",
+];
+
 #[derive(Debug, Clone)]
 pub struct WorkspaceSearcher {
     pub root: PathBuf,
@@ -44,10 +52,10 @@ impl WorkspaceSearcher {
             return Ok(());
         }
 
-        let query = if self.case_sensitive {
-            self.query.clone()
+        let query_lower: Option<String> = if self.case_sensitive {
+            None
         } else {
-            self.query.to_lowercase()
+            Some(self.query.to_lowercase())
         };
 
         let regex = if self.is_regex {
@@ -71,6 +79,7 @@ impl WorkspaceSearcher {
         let mut processed = 0usize;
 
         let walker = WalkBuilder::new(&self.root)
+            .follow_links(false)
             .hidden(false)
             .git_ignore(true)
             .build();
@@ -86,6 +95,20 @@ impl WorkspaceSearcher {
         for file_path in &file_paths {
             if self.results.len() >= self.max_results {
                 break;
+            }
+
+            if should_skip_by_extension(file_path) {
+                processed += 1;
+                self.progress = if total_files > 0 { processed as f32 / total_files as f32 } else { 1.0 };
+                continue;
+            }
+
+            if let Ok(md) = std::fs::metadata(file_path) {
+                if md.len() > MAX_SEARCH_FILE_SIZE {
+                    processed += 1;
+                    self.progress = if total_files > 0 { processed as f32 / total_files as f32 } else { 1.0 };
+                    continue;
+                }
             }
 
             let should_include = if include_regexes.is_empty() {
@@ -114,7 +137,7 @@ impl WorkspaceSearcher {
                 continue;
             }
 
-            match search_file(file_path, &query, &regex, self.case_sensitive) {
+            match search_file(file_path, &self.query, query_lower.as_deref(), &regex, self.case_sensitive) {
                 Ok(matches) => {
                     for m in &matches {
                         if self.results.len() >= self.max_results {
@@ -171,9 +194,20 @@ impl WorkspaceSearcher {
     }
 }
 
+fn should_skip_by_extension(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext_lower = ext.to_lowercase();
+        if SKIP_EXTENSIONS.contains(&ext_lower.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn search_file(
     path: &Path,
     query: &str,
+    query_lower: Option<&str>,
     regex: &Option<Regex>,
     case_sensitive: bool,
 ) -> Result<Vec<SearchResult>, anyhow::Error> {
@@ -193,15 +227,10 @@ fn search_file(
                 });
             }
         }
-    } else {
+    } else if case_sensitive {
         for (line_idx, line) in content.lines().enumerate() {
-            let search_line = if case_sensitive {
-                line.to_string()
-            } else {
-                line.to_lowercase()
-            };
             let mut start = 0;
-            while let Some(pos) = search_line[start..].find(query) {
+            while let Some(pos) = line[start..].find(query) {
                 let abs_pos = start + pos;
                 results.push(SearchResult {
                     path: path.to_path_buf(),
@@ -212,12 +241,69 @@ fn search_file(
                     match_end: abs_pos + query.len(),
                 });
                 start = abs_pos + 1;
-                if start >= search_line.len() {
+                if start >= line.len() {
                     break;
                 }
+            }
+        }
+    } else {
+        let needle_lower = match query_lower {
+            Some(q) => q,
+            None => return Ok(results),
+        };
+        for (line_idx, line) in content.lines().enumerate() {
+            let matches = find_case_insensitive(line, &needle_lower);
+            for (byte_start, byte_end) in matches {
+                results.push(SearchResult {
+                    path: path.to_path_buf(),
+                    line: line_idx,
+                    column: byte_start,
+                    line_content: line.to_string(),
+                    match_start: byte_start,
+                    match_end: byte_end,
+                });
             }
         }
     }
 
     Ok(results)
+}
+
+fn find_case_insensitive(haystack: &str, needle_lower: &str) -> Vec<(usize, usize)> {
+    let mut results = Vec::new();
+    if needle_lower.is_empty() {
+        return results;
+    }
+    let needle_chars: Vec<char> = needle_lower.chars().collect();
+    let hay_chars: Vec<char> = haystack.chars().collect();
+    let mut byte_indices: Vec<usize> = Vec::with_capacity(hay_chars.len() + 1);
+    {
+        let mut b = 0usize;
+        for c in &hay_chars {
+            byte_indices.push(b);
+            b += c.len_utf8();
+        }
+        byte_indices.push(b);
+    }
+    'outer: for start in 0..hay_chars.len() {
+        let mut ni = 0usize;
+        let mut hi = start;
+        while ni < needle_chars.len() && hi < hay_chars.len() {
+            let hlc: Vec<char> = hay_chars[hi].to_lowercase().collect();
+            if ni + hlc.len() > needle_chars.len() {
+                continue 'outer;
+            }
+            if needle_chars[ni..ni + hlc.len()] != hlc[..] {
+                continue 'outer;
+            }
+            ni += hlc.len();
+            hi += 1;
+        }
+        if ni == needle_chars.len() {
+            let byte_start = byte_indices[start];
+            let byte_end = byte_indices[hi];
+            results.push((byte_start, byte_end));
+        }
+    }
+    results
 }

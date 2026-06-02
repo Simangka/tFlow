@@ -25,11 +25,31 @@ impl EditMode {
     }
 }
 
+impl Default for EditMode {
+    fn default() -> Self {
+        EditMode::Normal
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Forward,
     Backward,
     None,
+}
+
+impl Direction {
+    pub fn is_forward(&self) -> bool {
+        matches!(self, Direction::Forward)
+    }
+
+    pub fn is_backward(&self) -> bool {
+        matches!(self, Direction::Backward)
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Direction::None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +93,7 @@ pub enum WorkspaceItem {
     Directory(PathBuf, Vec<WorkspaceItem>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationLevel {
     Info,
     Warning,

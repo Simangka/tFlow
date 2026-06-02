@@ -1,3 +1,6 @@
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
+
 use ratatui::{
     Frame,
     layout::Rect,
@@ -5,11 +8,31 @@ use ratatui::{
     style::{Style, Modifier, Color},
     text::{Line as TextLine, Span},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
 use crate::editor::modes::EditorMode;
 use crate::core::{EditMode, BufferInfo};
 use crate::config::Config;
+
+const READONLY_REFRESH: Duration = Duration::from_secs(5);
+
+pub struct ReadonlyCacheEntry {
+    pub readonly: bool,
+    pub last_check: Instant,
+}
+
+pub struct StatusLineState {
+    pub readonly_cache: HashMap<std::path::PathBuf, ReadonlyCacheEntry>,
+}
+
+impl Default for StatusLineState {
+    fn default() -> Self {
+        Self {
+            readonly_cache: HashMap::new(),
+        }
+    }
+}
 
 pub struct StatusLine;
 
@@ -26,6 +49,34 @@ impl StatusLine {
         is_recording: bool,
         git_branch: Option<&str>,
     ) {
+        Self::render_with_state(
+            frame,
+            area,
+            mode,
+            buffer_info,
+            _config,
+            theme,
+            cursor_position,
+            total_lines,
+            is_recording,
+            git_branch,
+            None,
+        )
+    }
+
+    pub fn render_with_state(
+        frame: &mut Frame,
+        area: Rect,
+        mode: &EditorMode,
+        buffer_info: &BufferInfo,
+        _config: &Config,
+        theme: &Theme,
+        cursor_position: crate::core::Position,
+        total_lines: usize,
+        is_recording: bool,
+        git_branch: Option<&str>,
+        state: Option<&mut StatusLineState>,
+    ) {
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -35,16 +86,15 @@ impl StatusLine {
 
         let filename = buffer_info.name.as_str();
         let modified = if buffer_info.is_modified { " [+]" } else { "" };
-        let readonly = if buffer_info.path.as_ref().map_or(false, |p| {
-            p.metadata().ok().map_or(false, |m| m.permissions().readonly())
-        }) { " [RO]" } else { "" };
+        let readonly = Self::check_readonly(buffer_info, state);
+        let readonly_str = if readonly { " [RO]" } else { "" };
 
         let line = cursor_position.line + 1;
         let col = cursor_position.column + 1;
-        let percentage = if total_lines > 0 {
-            ((cursor_position.line as f64 + 1.0) / total_lines as f64 * 100.0) as usize
+        let percentage = if total_lines > 1 {
+            (cursor_position.line * 100) / (total_lines - 1).max(1)
         } else {
-            0
+            100
         };
 
         let encoding = "utf-8";
@@ -56,19 +106,20 @@ impl StatusLine {
             mode_style,
         ));
 
+        let left_body = format!(
+            " {} {}{}{} ",
+            filename,
+            modified,
+            readonly_str,
+            if is_recording { " [REC]" } else { "" },
+        );
         all_spans.push(Span::styled(
-            format!(
-                " {} {}{}{} ",
-                filename,
-                modified,
-                readonly,
-                if is_recording { " [REC]" } else { "" },
-            ),
+            left_body.clone(),
             Style::default().fg(theme.statusline_filename),
         ));
 
-        let left_len = mode_indicator.len() + 2 + filename.len() + modified.len() + readonly.len()
-            + if is_recording { 6 } else { 0 } + 3;
+        let left_str = format!(" {} {} ", mode_indicator, left_body);
+        let left_len = UnicodeWidthStr::width(left_str.as_str());
 
         let right_text = if let Some(branch) = git_branch {
             format!(" {} {}:{} {}% {} {} ", branch, line, col, percentage, encoding, buffer_info.line_count)
@@ -76,7 +127,7 @@ impl StatusLine {
             format!(" {}:{} {}% {} {} ", line, col, percentage, encoding, buffer_info.line_count)
         };
 
-        let right_len = right_text.len();
+        let right_len = UnicodeWidthStr::width(right_text.as_str());
         let total_width = area.width as usize;
         let middle_padding = total_width.saturating_sub(left_len + right_len);
         let middle = " ".repeat(middle_padding);
@@ -115,6 +166,36 @@ impl StatusLine {
         let paragraph = Paragraph::new(TextLine::from(all_spans))
             .style(Style::default().bg(theme.statusline_bg).fg(theme.statusline_fg));
         frame.render_widget(paragraph, area);
+    }
+
+    fn check_readonly(buffer_info: &BufferInfo, mut state: Option<&mut StatusLineState>) -> bool {
+        let path = match buffer_info.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+        let now = Instant::now();
+        if let Some(s) = state.as_deref_mut() {
+            if let Some(entry) = s.readonly_cache.get(&path) {
+                if now.duration_since(entry.last_check) < READONLY_REFRESH {
+                    return entry.readonly;
+                }
+            }
+        }
+        let readonly = path
+            .metadata()
+            .ok()
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(false);
+        if let Some(s) = state.as_deref_mut() {
+            s.readonly_cache.insert(
+                path,
+                ReadonlyCacheEntry {
+                    readonly,
+                    last_check: now,
+                },
+            );
+        }
+        readonly
     }
 
     pub fn mode_indicator(mode: &EditMode) -> &'static str {

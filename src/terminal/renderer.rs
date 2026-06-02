@@ -10,20 +10,24 @@ fn vtcolor_to_ratatui(color: vt100::Color, default: Color) -> Color {
     }
 }
 
-fn vtcell_style(cell: &vt100::Cell, theme: &Theme) -> (Style, Style) {
-    let mut fg = vtcolor_to_ratatui(cell.fgcolor(), theme.fg);
-    let mut bg = vtcolor_to_ratatui(cell.bgcolor(), theme.bg);
+fn vtcell_style(cell: &vt100::Cell, theme: &Theme) -> (Style, bool) {
+    let fg = vtcolor_to_ratatui(cell.fgcolor(), theme.fg);
+    let bg = vtcolor_to_ratatui(cell.bgcolor(), theme.bg);
     let mut mods = Modifier::empty();
-    if cell.inverse() { std::mem::swap(&mut fg, &mut bg); }
     if cell.bold() { mods |= Modifier::BOLD; }
     if cell.italic() { mods |= Modifier::ITALIC; }
     if cell.underline() { mods |= Modifier::UNDERLINED; }
-    (Style::default().fg(fg).bg(bg), Style::default().fg(bg).bg(fg).add_modifier(mods))
+    (Style::default().fg(fg).bg(bg).add_modifier(mods), cell.inverse())
 }
 
 fn cell_text(cell: &vt100::Cell) -> String {
-    let s = cell.contents();
-    if s.is_empty() { " ".to_string() } else { s }
+    let raw = cell.contents();
+    if raw.is_empty() {
+        return " ".to_string();
+    }
+    raw.chars()
+        .map(|c| if c.is_control() && c != '\t' && c != '\n' && c != '\r' { ' ' } else { c })
+        .collect()
 }
 
 /// Render terminal screen state into ratatui lines.
@@ -39,6 +43,9 @@ pub fn render_vt100_lines(
     is_focused: bool,
     exited: bool,
 ) -> (Vec<Line<'static>>, Option<(usize, u16)>) {
+    if height == 0 || width == 0 {
+        return (Vec::new(), None);
+    }
     parser.set_scrollback(scroll_offset);
     let screen = parser.screen();
     let (rows, cols) = screen.size();
@@ -61,7 +68,12 @@ pub fn render_vt100_lines(
         let mut spans: Vec<Span> = Vec::with_capacity(width);
         for c in 0..width.min(cols as usize) {
             if let Some(cell) = screen.cell(r as u16, c as u16) {
-                let (style, _rev) = vtcell_style(cell, theme);
+                let (style, rev) = vtcell_style(cell, theme);
+                let style = if rev {
+                    style.add_modifier(Modifier::REVERSED)
+                } else {
+                    style
+                };
                 spans.push(Span::styled(cell_text(cell), style));
             } else {
                 spans.push(Span::styled(" ", bg_fill));
@@ -90,7 +102,7 @@ pub fn render_vt100_lines(
     if let Some((cur_line, cur_col)) = cursor {
         if cur_line < lines.len() {
             let line = &mut lines[cur_line];
-            let col = cur_col as usize;
+            let col = (cur_col as usize).min(width.saturating_sub(1));
             if col < line.spans.len() {
                 let span = &line.spans[col];
                 // Create reversed style from the span's current style

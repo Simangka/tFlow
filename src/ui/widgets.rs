@@ -40,7 +40,8 @@ impl WidgetRenderer {
             .block(Block::default().style(style));
         frame.render_widget(paragraph, area);
 
-        let cursor_x = area.x + 1 + cursor as u16;
+        let cursor_clamped = cursor.min(area.width.saturating_sub(2) as usize);
+        let cursor_x = area.x + 1 + cursor_clamped as u16;
         let cursor_x = cursor_x.min(area.x + area.width.saturating_sub(1));
         frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, area.y));
     }
@@ -80,7 +81,8 @@ impl WidgetRenderer {
             .block(Block::default().style(style));
         frame.render_widget(paragraph, area);
 
-        let cursor_x = area.x + 1 + query.len() as u16;
+        let cursor_clamped = query.len().min(area.width.saturating_sub(2) as usize);
+        let cursor_x = area.x + 1 + cursor_clamped as u16;
         let cursor_x = cursor_x.min(area.x + area.width.saturating_sub(1));
         frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, area.y));
     }
@@ -139,12 +141,20 @@ impl WidgetRenderer {
             .border_style(Style::default().fg(theme.border))
             .style(Style::default().bg(theme.bg));
 
-        let _inner = block.inner(area);
+        let inner = block.inner(area);
+        let max_line_width = inner.width.saturating_sub(2) as usize;
+        let max_rows = inner.height as usize;
         let content_lines: Vec<TextLine> = content
             .lines()
+            .take(max_rows)
             .map(|l| {
+                let truncated: String = if max_line_width > 0 {
+                    l.chars().take(max_line_width).collect()
+                } else {
+                    String::new()
+                };
                 TextLine::from(vec![Span::styled(
-                    l.to_string(),
+                    truncated,
                     Style::default().fg(theme.fg),
                 )])
             })
@@ -242,11 +252,12 @@ impl WidgetRenderer {
             .border_style(Style::default().fg(theme.border))
             .style(Style::default().bg(theme.bg));
 
-        let _inner = block.inner(area);
+        let inner = block.inner(area);
+        let max_rows = inner.height as usize;
 
         let mut lines: Vec<TextLine> = Vec::new();
 
-        for (key, desc) in bindings {
+        for (key, desc) in bindings.iter().take(max_rows) {
             let key_span = Span::styled(
                 format!(" {:<20} ", key),
                 Style::default().fg(theme.statusline_mode),

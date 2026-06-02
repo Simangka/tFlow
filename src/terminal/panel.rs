@@ -1,7 +1,7 @@
 use crate::terminal::pty::TerminalProcess;
 use tokio::sync::mpsc;
 
-const MAX_SCROLLBACK: usize = 5000;
+pub const MAX_SCROLLBACK_LINES: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TerminalPosition {
@@ -24,8 +24,8 @@ pub enum TerminalState {
 
 pub struct TerminalInstance {
     pub process: TerminalProcess,
-    pub rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    pub redraw_rx: mpsc::UnboundedReceiver<()>,
+    pub rx: mpsc::Receiver<Vec<u8>>,
+    pub redraw_rx: mpsc::Receiver<()>,
     pub parser: vt100::Parser,
     pub title: String,
     pub scroll_offset: usize,
@@ -40,7 +40,7 @@ impl TerminalInstance {
             process,
             rx,
             redraw_rx,
-            parser: vt100::Parser::new(rows.max(1), cols.max(10), MAX_SCROLLBACK),
+            parser: vt100::Parser::new(rows.max(1), cols.max(10), MAX_SCROLLBACK_LINES),
             title,
             scroll_offset: 0,
             shell: shell.to_string(),
@@ -56,7 +56,7 @@ impl TerminalInstance {
         self.process = process;
         self.rx = rx;
         self.redraw_rx = redraw_rx;
-        self.parser = vt100::Parser::new(rows, cols, MAX_SCROLLBACK);
+        self.parser = vt100::Parser::new(rows, cols, MAX_SCROLLBACK_LINES);
         self.state = TerminalState::Running;
         self.scroll_offset = 0;
         Ok(())
@@ -150,7 +150,7 @@ impl TerminalInstance {
 
     pub fn scroll_up(&mut self) {
         let current = self.parser.screen().scrollback();
-        self.parser.set_scrollback(usize::MAX);
+        self.parser.set_scrollback(MAX_SCROLLBACK_LINES);
         let max = self.parser.screen().scrollback();
         self.parser.set_scrollback(current);
         self.scroll_offset = self.scroll_offset.saturating_add(1).min(max);
@@ -343,9 +343,30 @@ pub fn suspend_to_shell() {
     use std::io::Write;
     use crossterm::terminal::{LeaveAlternateScreen, EnterAlternateScreen};
 
+    struct TerminalResumeGuard;
+    impl Drop for TerminalResumeGuard {
+        fn drop(&mut self) {
+            use crossterm::{
+                execute, cursor::Show,
+                event::{EnableMouseCapture, EnableFocusChange, EnableBracketedPaste},
+                terminal::EnterAlternateScreen,
+            };
+            let mut stdout = std::io::stdout();
+            let _ = execute!(
+                stdout,
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                EnableFocusChange,
+                EnableBracketedPaste,
+                Show
+            );
+        }
+    }
+
     let _ = std::io::stdout().flush();
     let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
     let _ = crossterm::terminal::disable_raw_mode();
+    let _guard = TerminalResumeGuard;
     let _ = writeln!(
         std::io::stdout(),
         "\r\n[Suspended. Type 'exit' to return to tFlow.]\r\n"

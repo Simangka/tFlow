@@ -1,5 +1,6 @@
 use crate::core::{Position, Range, EditMode};
 use ropey::Rope;
+use std::cell::Cell;
 use std::path::PathBuf;
 
 pub struct Buffer {
@@ -17,6 +18,7 @@ pub struct Buffer {
     pub line_endings: LineEnding,
     pub encoding: String,
     pub readonly: bool,
+    pub cached_line_count: Cell<Option<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,7 @@ impl Buffer {
             line_endings: LineEnding::Lf,
             encoding: "utf-8".to_string(),
             readonly: false,
+            cached_line_count: Cell::new(None),
         }
     }
 
@@ -68,9 +71,14 @@ impl Buffer {
     }
 
     pub fn load(&mut self) -> Result<(), anyhow::Error> {
-        let path = self.path.as_ref().ok_or_else(|| anyhow::anyhow!("No path set"))?;
-        let content = std::fs::read_to_string(path)?;
-        let (cleaned, ending) = Self::clean_line_endings(&content);
+        let path = self.path.as_ref().ok_or_else(|| anyhow::anyhow!("No path set"))?.clone();
+        let bytes = std::fs::read(&path)?;
+        let (text, encoding) = decode_bytes(&bytes);
+        if text.is_empty() && !bytes.is_empty() {
+            anyhow::bail!("file is non-text/binary; refusing to load empty content");
+        }
+        self.encoding = encoding;
+        let (cleaned, ending) = Self::clean_line_endings(&text);
         self.rope = Rope::from_str(&cleaned);
         self.line_endings = ending;
         self.dirty = false;
@@ -78,18 +86,56 @@ impl Buffer {
         self.cursor = Position::zero();
         self.saved_cursor = Position::zero();
         self.scroll_offset = Position::zero();
+        self.cached_line_count.set(None);
         Ok(())
     }
 
     pub fn save(&mut self) -> Result<(), anyhow::Error> {
-        let path = self.path.as_ref().ok_or_else(|| anyhow::anyhow!("No path set"))?;
+        let path = self.path.as_ref().ok_or_else(|| anyhow::anyhow!("No path set"))?.clone();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.permissions().readonly() {
+                anyhow::bail!("file is read-only");
+            }
+        }
+        if self.encoding == "utf-16le" || self.encoding == "utf-16be" {
+            tracing::warn!(
+                encoding = %self.encoding,
+                "saving UTF-16 file as UTF-8; data may be corrupted"
+            );
+        }
         let text = self.rope.to_string();
         let output = match self.line_endings {
             LineEnding::Lf => text,
             LineEnding::CrLf => text.replace('\n', "\r\n"),
             LineEnding::Cr => text.replace('\n', "\r"),
         };
-        std::fs::write(path, output.as_bytes())?;
+        let dir = path.parent().ok_or_else(|| anyhow::anyhow!("no parent dir"))?;
+        let file_name = path.file_name().ok_or_else(|| anyhow::anyhow!("no file name"))?;
+        let tmp_name = format!(".{}.tflow.tmp.{}", file_name.to_string_lossy(), std::process::id());
+        let tmp_path = dir.join(tmp_name);
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            f.write_all(output.as_bytes())?;
+            f.sync_all()?;
+        }
+        match std::fs::rename(&tmp_path, &path) {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(anyhow::anyhow!("rename failed: {}", e));
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Ok(dir_file) = std::fs::File::open(dir) {
+                let _ = dir_file.sync_all();
+            }
+        }
         self.dirty = false;
         self.modified_at = Some(std::time::SystemTime::now());
         Ok(())
@@ -135,11 +181,25 @@ impl Buffer {
         if line >= self.rope.len_lines() {
             return 0;
         }
-        self.rope.line(line).len_chars()
+        let raw = self.rope.line(line).len_chars();
+        if raw == 0 {
+            return 0;
+        }
+        let last_char = self.rope.line(line).chars().last();
+        if matches!(last_char, Some('\n')) {
+            raw.saturating_sub(1)
+        } else {
+            raw
+        }
     }
 
     pub fn line_count(&self) -> usize {
-        self.rope.len_lines()
+        if let Some(c) = self.cached_line_count.get() {
+            return c;
+        }
+        let n = self.rope.len_lines();
+        self.cached_line_count.set(Some(n));
+        n
     }
 
     pub fn total_chars(&self) -> usize {
@@ -167,11 +227,17 @@ impl Buffer {
     pub fn insert_char(&mut self, pos: Position, c: char) {
         let idx = self.pos_to_char_idx(pos);
         self.rope.insert_char(idx, c);
+        self.cached_line_count.set(None);
     }
 
     pub fn insert_str(&mut self, pos: Position, s: &str) {
+        const MAX_LINE_LEN: usize = 100_000;
+        if s.len() > MAX_LINE_LEN && !s.contains('\n') {
+            tracing::warn!(len = s.len(), "insert_str: single mega-line exceeds MAX_LINE_LEN");
+        }
         let idx = self.pos_to_char_idx(pos);
         self.rope.insert(idx, s);
+        self.cached_line_count.set(None);
     }
 
     pub fn delete_char(&mut self, pos: Position) -> Option<char> {
@@ -184,6 +250,7 @@ impl Buffer {
         }
         let c = self.rope.chars_at(idx).next()?;
         self.rope.remove(idx..idx + 1);
+        self.cached_line_count.set(None);
         Some(c)
     }
 
@@ -196,6 +263,7 @@ impl Buffer {
         }
         let deleted = self.rope.slice(start_idx..end_idx).to_string();
         self.rope.remove(start_idx..end_idx);
+        self.cached_line_count.set(None);
         deleted
     }
 
@@ -210,12 +278,14 @@ impl Buffer {
         let prev_idx = idx - 1;
         let c = self.rope.chars_at(prev_idx).next()?;
         self.rope.remove(prev_idx..idx);
+        self.cached_line_count.set(None);
         Some(c)
     }
 
     pub fn insert_newline(&mut self, pos: Position) {
         let idx = self.pos_to_char_idx(pos);
         self.rope.insert_char(idx, '\n');
+        self.cached_line_count.set(None);
     }
 
     pub fn get_line(&self, idx: usize) -> String {
@@ -223,6 +293,13 @@ impl Buffer {
             return String::new();
         }
         self.rope.line(idx).to_string()
+    }
+
+    pub fn try_get_line(&self, idx: usize) -> Option<String> {
+        if idx >= self.rope.len_lines() {
+            return None;
+        }
+        Some(self.rope.line(idx).to_string())
     }
 
     pub fn get_text(&self) -> String {
@@ -296,4 +373,34 @@ impl Buffer {
     pub fn clear_modified(&mut self) {
         self.dirty = false;
     }
+}
+
+fn decode_bytes(bytes: &[u8]) -> (String, String) {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return (
+            String::from_utf8_lossy(&bytes[3..]).to_string(),
+            "utf-8".to_string(),
+        );
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let u16s: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return (String::from_utf16_lossy(&u16s), "utf-16le".to_string());
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let u16s: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        return (String::from_utf16_lossy(&u16s), "utf-16be".to_string());
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return (s.to_string(), "utf-8".to_string());
+    }
+    (
+        String::from_utf8_lossy(bytes).to_string(),
+        "utf-8-lossy".to_string(),
+    )
 }

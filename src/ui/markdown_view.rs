@@ -20,7 +20,7 @@ pub enum MarkdownLine {
     CodeBlock(String, Style, Style),
     BlockQuote(Vec<MarkdownLine>, Style),
     ListItem(Vec<MarkdownLine>, usize, Style),
-    Table(Vec<Vec<MarkdownLine>>, Vec<ratatui::layout::Alignment>),
+    Table(Vec<MarkdownLine>, Vec<Vec<MarkdownLine>>, Vec<ratatui::layout::Alignment>),
     TableHeader(Vec<MarkdownLine>),
     HorizontalRule(Style),
     Checkbox(bool, String, Style),
@@ -82,14 +82,25 @@ enum ParseState {
     Root,
     #[allow(dead_code)]
     InParagraph(Vec<(String, Style)>),
-    InBlockQuote,
+    InBlockQuote(Vec<(String, Style)>),
     InListItem(usize, Vec<MarkdownLine>),
     InCodeBlock(String, Style, Style),
-    InTable(Vec<Vec<MarkdownLine>>, Vec<ratatui::layout::Alignment>),
+    InTable(Vec<Vec<MarkdownLine>>, Vec<ratatui::layout::Alignment>, Vec<MarkdownLine>),
     InTableRow(Vec<MarkdownLine>),
     InTableHeader(Vec<MarkdownLine>),
     InHeading(usize, Style, Vec<(String, Style)>),
+    InImage(String, String, String),
 }
+
+fn topmost_state_is_root_or_paragraph(stack: &[ParseState]) -> bool {
+    match stack.last() {
+        Some(ParseState::Root) | Some(ParseState::InParagraph(_)) => true,
+        Some(_) => false,
+        None => true,
+    }
+}
+
+const MAX_RENDERED_LINES: usize = 50_000;
 
 impl MarkdownView {
     pub fn new() -> Self {
@@ -112,6 +123,9 @@ impl MarkdownView {
         let mut list_item_index: usize = 0;
 
         for event in parser {
+            if self.rendered.len() >= MAX_RENDERED_LINES {
+                break;
+            }
             match event {
                 Event::Start(tag) => {
                     match tag {
@@ -134,7 +148,7 @@ impl MarkdownView {
                             state_stack.push(ParseState::InHeading(size, style, Vec::new()));
                         }
                         Tag::BlockQuote(_) => {
-                            state_stack.push(ParseState::InBlockQuote);
+                            state_stack.push(ParseState::InBlockQuote(Vec::new()));
                         }
                         Tag::CodeBlock(kind) => {
                             let _lang = match &kind {
@@ -160,7 +174,7 @@ impl MarkdownView {
                                 pulldown_cmark::Alignment::Center => ratatui::layout::Alignment::Center,
                                 pulldown_cmark::Alignment::None => ratatui::layout::Alignment::Left,
                             }).collect();
-                            state_stack.push(ParseState::InTable(Vec::new(), al));
+                            state_stack.push(ParseState::InTable(Vec::new(), al, Vec::new()));
                         }
                         Tag::TableHead => {
                             state_stack.push(ParseState::InTableHeader(Vec::new()));
@@ -182,11 +196,23 @@ impl MarkdownView {
                                 Style::default().add_modifier(Modifier::CROSSED_OUT),
                             );
                         }
-                        Tag::Link { dest_url, .. } => {
+                        Tag::Link { dest_url, title, .. } => {
                             current_style_stack.push(s.link);
-                            current_text.push((format!("[{}]", dest_url), s.link));
+                            if topmost_state_is_root_or_paragraph(&state_stack) {
+                                let label = if !title.is_empty() {
+                                    title.to_string()
+                                } else {
+                                    dest_url.to_string()
+                                };
+                                current_text.push((format!("[{}]({})", label, dest_url), s.link));
+                            }
                         }
-                        Tag::Image { .. } => {
+                        Tag::Image { dest_url, title, .. } => {
+                            state_stack.push(ParseState::InImage(
+                                dest_url.to_string(),
+                                title.to_string(),
+                                String::new(),
+                            ));
                         }
                         _ => {}
                     }
@@ -214,11 +240,22 @@ impl MarkdownView {
                             state_stack.pop();
                         }
                         TagEnd::BlockQuote(_) => {
-                            let quote_lines = Vec::new();
-                            while let Some(ParseState::InBlockQuote) = state_stack.last() {
+                            if let Some(ParseState::InBlockQuote(ref mut segments)) = state_stack.last_mut() {
+                                if !current_text.is_empty() {
+                                    segments.extend(std::mem::take(&mut current_text));
+                                }
+                                let mut children = Vec::new();
+                                if !segments.is_empty() {
+                                    children.push(MarkdownLine::Paragraph(segments.clone()));
+                                }
                                 state_stack.pop();
+                                self.rendered.push(MarkdownLine::BlockQuote(children, s.quote));
+                            } else {
+                                while let Some(ParseState::InBlockQuote(_)) = state_stack.last() {
+                                    state_stack.pop();
+                                }
+                                self.rendered.push(MarkdownLine::BlockQuote(Vec::new(), s.quote));
                             }
-                            self.rendered.push(MarkdownLine::BlockQuote(quote_lines, s.quote));
                         }
                         TagEnd::CodeBlock => {
                             if let Some(ParseState::InCodeBlock(code, cs, cbs)) = state_stack.pop() {
@@ -229,39 +266,56 @@ impl MarkdownView {
                             list_item_index = 0;
                         }
                         TagEnd::Item => {
-                            if let Some(ParseState::InListItem(idx, ref mut children)) = state_stack.last_mut() {
-                                if !current_text.is_empty() {
-                                    let text = std::mem::take(&mut current_text);
-                                    children.push(MarkdownLine::Paragraph(text));
+                            let pop_now = matches!(state_stack.last(), Some(ParseState::InListItem(_, _)));
+                            if pop_now {
+                                if let Some(ParseState::InListItem(idx, ref mut children)) = state_stack.last_mut() {
+                                    if !current_text.is_empty() {
+                                        let text = std::mem::take(&mut current_text);
+                                        children.push(MarkdownLine::Paragraph(text));
+                                    }
+                                    let mut children_vec = Vec::new();
+                                    std::mem::swap(&mut children_vec, children);
+                                    self.rendered.push(MarkdownLine::ListItem(children_vec, *idx, s.list));
                                 }
-                                let mut children_vec = Vec::new();
-                                std::mem::swap(&mut children_vec, children);
-                                self.rendered.push(MarkdownLine::ListItem(children_vec, *idx, s.list));
-                            }
-                            if let Some(ParseState::InListItem(ref mut idx, _)) = state_stack.last_mut() {
-                                *idx += 1;
-                            }
-                            if matches!(state_stack.last(), Some(ParseState::InListItem(_, _))) {
                                 state_stack.pop();
                             }
                         }
                         TagEnd::Table => {
-                            if let Some(ParseState::InTable(rows, aligns)) = state_stack.pop() {
-                                self.rendered.push(MarkdownLine::Table(rows, aligns));
+                            if let Some(ParseState::InTable(rows, aligns, header)) = state_stack.pop() {
+                                if header.is_empty() && rows.is_empty() {
+                                } else {
+                                    self.rendered.push(MarkdownLine::Table(header, rows, aligns));
+                                }
                             }
                         }
                         TagEnd::TableHead => {
                             if let Some(ParseState::InTableHeader(ref mut cells)) = state_stack.last_mut() {
+                                if !current_text.is_empty() {
+                                    let text = std::mem::take(&mut current_text);
+                                    cells.push(MarkdownLine::Paragraph(text));
+                                }
                                 let header_lines: Vec<MarkdownLine> = cells.drain(..).collect();
-                                self.rendered.push(MarkdownLine::TableHeader(header_lines));
+                                if let Some(ParseState::InTable(_, _, ref mut hdr)) = state_stack.iter_mut().rev().find_map(|s| {
+                                    if let ParseState::InTable(_, _, _) = s {
+                                        Some(s)
+                                    } else {
+                                        None
+                                    }
+                                }) {
+                                    *hdr = header_lines;
+                                }
                             }
                             state_stack.pop();
                         }
                         TagEnd::TableRow => {
                             if let Some(ParseState::InTableRow(ref mut cells)) = state_stack.last_mut() {
+                                if !current_text.is_empty() {
+                                    let text = std::mem::take(&mut current_text);
+                                    cells.push(MarkdownLine::Paragraph(text));
+                                }
                                 let mut row_cells = Vec::new();
                                 std::mem::swap(&mut row_cells, cells);
-                                if let Some(ParseState::InTable(ref mut rows, _)) = state_stack.last_mut() {
+                                if let Some(ParseState::InTable(ref mut rows, _, _)) = state_stack.last_mut() {
                                     rows.push(row_cells);
                                 }
                             }
@@ -299,45 +353,71 @@ impl MarkdownView {
                             current_style_stack.pop();
                         }
                         TagEnd::Image => {
+                            if let Some(ParseState::InImage(dest_url, title, mut alt)) = state_stack.pop() {
+                                if !current_text.is_empty() {
+                                    let text = std::mem::take(&mut current_text);
+                                    for (seg, _) in text {
+                                        alt.push_str(&seg);
+                                    }
+                                }
+                                let label = if !alt.is_empty() {
+                                    alt
+                                } else if !title.is_empty() {
+                                    title
+                                } else {
+                                    dest_url
+                                };
+                                self.rendered.push(MarkdownLine::Paragraph(vec![(
+                                    format!("[image: {}]", label),
+                                    Style::default().fg(Color::Rgb(150, 150, 150)).add_modifier(Modifier::ITALIC),
+                                )]));
+                            }
                         }
                         _ => {}
                     }
                 }
                 Event::Text(text) => {
                     let style = current_style_stack.last().copied().unwrap_or(s.fg);
+                    let mut handled = false;
                     for state in state_stack.iter_mut().rev() {
                         match state {
                             ParseState::InHeading(_, _, ref mut segments) => {
                                 segments.push((text.to_string(), style));
+                                handled = true;
                                 break;
                             }
                             ParseState::InCodeBlock(ref mut code, _, _) => {
                                 code.push_str(&text);
+                                handled = true;
                                 break;
                             }
                             ParseState::InParagraph(ref mut segs) => {
                                 segs.push((text.to_string(), style));
+                                handled = true;
+                                break;
+                            }
+                            ParseState::InImage(_, _, ref mut alt) => {
+                                alt.push_str(&text);
+                                handled = true;
                                 break;
                             }
                             _ => {
-                                current_text.push((text.to_string(), style));
-                                break;
+                                continue;
                             }
                         }
+                    }
+                    if !handled {
+                        current_text.push((text.to_string(), style));
                     }
                 }
                 Event::Code(text) => {
                     let style = Style::default().fg(Color::Rgb(200, 200, 0)).bg(Color::Rgb(0, 100, 0));
-                    for state in state_stack.iter_mut().rev() {
-                        match state {
-                            ParseState::InHeading(_, _, ref mut segments) => {
-                                segments.push((format!("`{}`", text), style));
-                                break;
-                            }
-                            _ => {
-                                current_text.push((format!("`{}`", text), style));
-                                break;
-                            }
+                    match state_stack.last_mut() {
+                        Some(ParseState::InHeading(_, _, ref mut segments)) => {
+                            segments.push((format!("`{}`", text), style));
+                        }
+                        _ => {
+                            current_text.push((format!("`{}`", text), style));
                         }
                     }
                 }
@@ -445,9 +525,8 @@ impl MarkdownView {
                         }
                     }
                 }
-                MarkdownLine::Table(rows, _alignments) => {
-                    for row in rows {
-                        let mut row_spans: Vec<Span> = Vec::new();
+                MarkdownLine::Table(header, rows, _alignments) => {
+                    let render_row = |row: &[MarkdownLine], row_spans: &mut Vec<Span>| {
                         for cell in row {
                             if let MarkdownLine::Paragraph(segments) = cell {
                                 for (text, s_text) in segments {
@@ -462,6 +541,15 @@ impl MarkdownView {
                                 ));
                             }
                         }
+                    };
+                    let mut header_spans: Vec<Span> = Vec::new();
+                    render_row(header, &mut header_spans);
+                    if !header_spans.is_empty() {
+                        lines.push(TextLine::from(header_spans));
+                    }
+                    for row in rows {
+                        let mut row_spans: Vec<Span> = Vec::new();
+                        render_row(row, &mut row_spans);
                         if !row_spans.is_empty() {
                             lines.push(TextLine::from(row_spans));
                         }

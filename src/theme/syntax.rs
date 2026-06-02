@@ -1,7 +1,7 @@
 use regex::Regex;
 use crate::theme::Theme;
 use ratatui::style::{Style, Modifier};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 pub struct SyntaxHighlighter;
 
@@ -235,11 +235,8 @@ impl SyntaxHighlighter {
                 if prefix == &"/*" || prefix == &"*/" || prefix == &"--[[" || prefix == &"]]" {
                     continue;
                 }
-                let search_start = 0;
-                while let Some(pos) = line[search_start..].find(prefix) {
-                    let abs_pos = search_start + pos;
+                if let Some(abs_pos) = line.find(prefix) {
                     comment_ranges.push((abs_pos, line.len(), comment_style));
-                    break;
                 }
             }
             all_ranges.extend(comment_ranges);
@@ -313,6 +310,9 @@ impl SyntaxHighlighter {
         let h1 = Style::default().fg(theme.heading1).add_modifier(Modifier::BOLD);
         let h2 = Style::default().fg(theme.heading2).add_modifier(Modifier::BOLD);
         let h3 = Style::default().fg(theme.heading3).add_modifier(Modifier::BOLD);
+        let h4 = Style::default().fg(theme.heading4).add_modifier(Modifier::BOLD);
+        let h5 = Style::default().fg(theme.heading5).add_modifier(Modifier::BOLD);
+        let h6 = Style::default().fg(theme.heading6).add_modifier(Modifier::BOLD);
         let code = Style::default().fg(theme.code_block);
         let link = Style::default().fg(theme.link);
         let quote = Style::default().fg(theme.blockquote).add_modifier(Modifier::ITALIC);
@@ -321,27 +321,34 @@ impl SyntaxHighlighter {
         let bold = Style::default().fg(theme.fg).add_modifier(Modifier::BOLD);
         let default = Style::default().fg(theme.fg);
 
-        if trimmed.starts_with("######") {
-            return vec![(line.to_string(), h3)];
+        if line.starts_with("```") || line.starts_with("~~~") {
+            return vec![(line.to_string(), code)];
         }
-        if trimmed.starts_with("#####") {
-            return vec![(line.to_string(), h3)];
-        }
-        if trimmed.starts_with("####") {
-            return vec![(line.to_string(), h2)];
-        }
-        if trimmed.starts_with("###") {
-            return vec![(line.to_string(), h2)];
-        }
-        if trimmed.starts_with("##") {
-            return vec![(line.to_string(), h1)];
-        }
-        if trimmed.starts_with("# ") {
-            return vec![(line.to_string(), h1)];
+
+        let hash_count = trimmed.chars().take_while(|c| *c == '#').count();
+        if hash_count >= 1 && hash_count <= 6 {
+            let after = trimmed[hash_count..].chars().next();
+            if after == Some(' ') || after == Some('\t') {
+                let style = match hash_count {
+                    1 => h1,
+                    2 => h2,
+                    3 => h3,
+                    4 => h4,
+                    5 => h5,
+                    6 => h6,
+                    _ => default,
+                };
+                return vec![(line.to_string(), style)];
+            }
         }
 
         if trimmed.starts_with("> ") || trimmed.starts_with('>') {
             return vec![(line.to_string(), quote)];
+        }
+
+        let hr_trimmed = line.trim();
+        if hr_trimmed == "---" || hr_trimmed == "***" || hr_trimmed == "___" {
+            return vec![(line.to_string(), hr)];
         }
 
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
@@ -349,10 +356,6 @@ impl SyntaxHighlighter {
         }
         if trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && trimmed.contains(". ") {
             return vec![(line.to_string(), list)];
-        }
-
-        if line.starts_with("```") || line.starts_with("~~~") {
-            return vec![(line.to_string(), code)];
         }
 
         let hr_chars: Vec<char> = trimmed.chars().filter(|c| *c == '-' || *c == '*' || *c == '_').collect();
@@ -491,14 +494,18 @@ impl SyntaxHighlighter {
         let before = if start == 0 {
             true
         } else {
-            let c = text.as_bytes()[start - 1] as char;
-            !c.is_alphanumeric() && c != '_'
+            match text[..start].chars().last() {
+                Some(c) => !c.is_alphanumeric() && c != '_',
+                None => true,
+            }
         };
         let after = if end >= text.len() {
             true
         } else {
-            let c = text.as_bytes()[end] as char;
-            !c.is_alphanumeric() && c != '_'
+            match text[end..].chars().next() {
+                Some(c) => !c.is_alphanumeric() && c != '_',
+                None => true,
+            }
         };
         before && after
     }
@@ -522,4 +529,145 @@ impl SyntaxHighlighter {
         }
         merged
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct HighlightSpan {
+    pub text: String,
+    pub style: Style,
+}
+
+pub struct LineCache {
+    by_buffer: std::collections::HashMap<u64, std::collections::HashMap<(u64, usize), Vec<HighlightSpan>>>,
+}
+
+impl LineCache {
+    pub fn new() -> Self {
+        Self {
+            by_buffer: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.by_buffer.clear();
+    }
+
+    pub fn highlight_line_cached(
+        &mut self,
+        buffer_id: u64,
+        revision: u64,
+        line_idx: usize,
+        line_text: &str,
+        ext: &str,
+        theme: &Theme,
+    ) -> Vec<HighlightSpan> {
+        if let Some(buffer_cache) = self.by_buffer.get(&buffer_id) {
+            if let Some(spans) = buffer_cache.get(&(revision, line_idx)) {
+                return spans.clone();
+            }
+        }
+        let segments = SyntaxHighlighter::highlight_line(line_text, ext, theme);
+        let spans: Vec<HighlightSpan> = segments
+            .into_iter()
+            .map(|(text, style)| HighlightSpan { text, style })
+            .collect();
+        let entry = self.by_buffer.entry(buffer_id).or_insert_with(std::collections::HashMap::new);
+        entry.insert((revision, line_idx), spans.clone());
+        let total: usize = self.by_buffer.values().map(|m| m.len()).sum();
+        if total > 50_000 {
+            self.by_buffer.clear();
+        }
+        spans
+    }
+}
+
+impl Default for LineCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HighlightState {
+    pub in_block_comment: bool,
+}
+
+pub fn highlight_line_with_state(
+    state: &mut HighlightState,
+    line: &str,
+    ext: &str,
+    theme: &Theme,
+) -> Vec<(String, Style)> {
+    let comment_style = Style::default().fg(theme.syntax_comment);
+
+    if state.in_block_comment {
+        if let Some(end_pos) = line.find("*/") {
+            let after_end = &line[end_pos + 2..];
+            state.in_block_comment = false;
+            let mut segments: Vec<(String, Style)> = Vec::new();
+            segments.push((line[..end_pos + 2].to_string(), comment_style));
+            if !after_end.is_empty() {
+                let rest = SyntaxHighlighter::highlight_line(after_end, ext, theme);
+                segments.extend(rest);
+            }
+            return segments;
+        } else {
+            return vec![(line.to_string(), comment_style)];
+        }
+    }
+
+    if let Some(start_pos) = line.find("/*") {
+        let before = &line[..start_pos];
+        let after_start = &line[start_pos..];
+        if let Some(end_rel) = after_start.find("*/") {
+            let end_abs = start_pos + end_rel + 2;
+            let after = &line[end_abs..];
+            let mut segments: Vec<(String, Style)> = Vec::new();
+            if !before.is_empty() {
+                segments.extend(SyntaxHighlighter::highlight_line(before, ext, theme));
+            }
+            segments.push((line[start_pos..end_abs].to_string(), comment_style));
+            if !after.is_empty() {
+                segments.extend(SyntaxHighlighter::highlight_line(after, ext, theme));
+            }
+            return segments;
+        } else {
+            state.in_block_comment = true;
+            let mut segments: Vec<(String, Style)> = Vec::new();
+            if !before.is_empty() {
+                segments.extend(SyntaxHighlighter::highlight_line(before, ext, theme));
+            }
+            segments.push((line[start_pos..].to_string(), comment_style));
+            return segments;
+        }
+    }
+
+    SyntaxHighlighter::highlight_line(line, ext, theme)
+}
+
+fn syntect_set() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting::ThemeSet) {
+    static S: OnceLock<(syntect::parsing::SyntaxSet, syntect::highlighting::ThemeSet)> = OnceLock::new();
+    S.get_or_init(|| (
+        syntect::parsing::SyntaxSet::load_defaults_newlines(),
+        syntect::highlighting::ThemeSet::load_defaults(),
+    ))
+}
+
+pub fn highlight_with_syntect(text: &str, ext: &str) -> Vec<(syntect::highlighting::Style, String)> {
+    let (ss, ts) = syntect_set();
+    let syntax = ss.find_syntax_by_extension(ext).unwrap_or_else(|| ss.find_syntax_plain_text());
+    let theme = match ts.themes.get("base16-ocean.dark") {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let mut h = syntect::easy::HighlightLines::new(syntax, theme);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if let Ok(ranges) = h.highlight_line(line, ss) {
+            for (style, s) in ranges {
+                out.push((style, s.to_string()));
+            }
+        }
+    }
+    out
 }

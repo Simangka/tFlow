@@ -31,6 +31,11 @@ pub enum FocusedPane {
     Editor,
     FileTree,
     Terminal,
+    MarkdownPreview,
+    WorkspaceSearch,
+    StagingPanel,
+    BranchView,
+    CommandPalette,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +76,9 @@ impl UILayout {
     }
 
     pub fn calculate_layout(&self, area: Rect) -> LayoutResult {
+        if area.width == 0 || area.height == 0 {
+            return Self::default_layout(area);
+        }
         let mut remaining = area;
 
         let notifications = if self.show_notifications {
@@ -163,12 +171,17 @@ impl UILayout {
                     (chunks[1], Some(chunks[0]))
                 }
                 TerminalPosition::Right => {
-                    let w = self.terminal_width.min(editor.width.saturating_sub(20)).max(60);
-                    let parts = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Min(1), Constraint::Length(w)])
-                        .split(editor);
-                    (parts[0], Some(parts[1]))
+                    if editor.width < 40 {
+                        (editor, None)
+                    } else {
+                        let avail = editor.width.saturating_sub(20).max(20);
+                        let w = self.terminal_width.clamp(20, avail);
+                        let parts = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints([Constraint::Min(1), Constraint::Length(w)])
+                            .split(editor);
+                        (parts[0], Some(parts[1]))
+                    }
                 }
             }
         } else {
@@ -197,7 +210,7 @@ impl UILayout {
             (editor, None)
         };
 
-        let gutter = Rect::new(editor.x, editor.y, 0, editor.height);
+        let gutter = Rect::new(editor.x, editor.y, Self::gutter_width(editor.height), editor.height);
 
         LayoutResult {
             editor,
@@ -264,36 +277,61 @@ impl UILayout {
         let ft_w = 28u16;
         match self.split_direction {
             SplitDirection::Horizontal => {
-                let fw = ft_w.min(area.width.saturating_sub(6));
+                let fw = ft_w.min(area.width.saturating_sub(6)).max(1);
                 let rw = area.width.saturating_sub(fw);
                 let pw = ((rw as f64) * 0.45) as u16;
-                let ew = rw.saturating_sub(pw);
+                let ew = rw.saturating_sub(pw).max(1);
                 let chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([
                         Constraint::Length(fw),
-                        Constraint::Min(ew.max(10)),
-                        Constraint::Length(pw.max(10)),
+                        Constraint::Min(ew),
+                        Constraint::Length(pw.max(1)),
                     ])
                     .split(area);
                 (chunks[1], Some(chunks[0]), Some(chunks[2]))
             }
             SplitDirection::Vertical => {
-                let fh = 12.min(area.height.saturating_sub(6));
+                let fh = 12.min(area.height.saturating_sub(6)).max(1);
                 let rh = area.height.saturating_sub(fh);
                 let ph = ((rh as f64) * 0.45) as u16;
-                let eh = rh.saturating_sub(ph);
+                let eh = rh.saturating_sub(ph).max(1);
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(fh),
-                        Constraint::Min(eh.max(3)),
-                        Constraint::Length(ph.max(3)),
+                        Constraint::Min(eh),
+                        Constraint::Length(ph.max(1)),
                     ])
                     .split(area);
                 (chunks[1], Some(chunks[0]), Some(chunks[2]))
             }
         }
+    }
+
+    fn default_layout(area: Rect) -> LayoutResult {
+        LayoutResult {
+            editor: area,
+            gutter: Rect::new(area.x, area.y, 5, area.height),
+            filetree: None,
+            markdown_preview: None,
+            statusbar: None,
+            commandbar: None,
+            palette: None,
+            search_panel: None,
+            notifications: None,
+            staging_panel: None,
+            branch_view: None,
+            terminal: None,
+        }
+    }
+
+    fn gutter_width(editor_height: u16) -> u16 {
+        if editor_height == 0 {
+            return 0;
+        }
+        let digits = ((editor_height as f64).log10().floor() as i32 + 1).max(1) as u16;
+        digits.min(8).max(1)
     }
 
     pub fn toggle_filetree(&mut self) {

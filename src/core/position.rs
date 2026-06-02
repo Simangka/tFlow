@@ -11,12 +11,23 @@ impl Position {
         Self { line, column }
     }
 
+    pub fn new_checked(line: usize, column: usize, max_line: usize, max_col: usize) -> Option<Self> {
+        if line <= max_line && column <= max_col {
+            Some(Self { line, column })
+        } else {
+            None
+        }
+    }
+
     pub fn zero() -> Self {
         Self { line: 0, column: 0 }
     }
 
     pub fn saturating_sub(&self, other: &Self) -> Self {
-        let line = self.line.saturating_sub(other.line);
+        if self.line < other.line {
+            return Self { line: 0, column: 0 };
+        }
+        let line = self.line - other.line;
         let column = if self.line == other.line {
             self.column.saturating_sub(other.column)
         } else {

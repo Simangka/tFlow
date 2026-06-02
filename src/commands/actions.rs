@@ -1,4 +1,11 @@
-﻿
+﻿#[derive(Debug, Clone)]
+pub enum MouseAction {
+    Click { x: u16, y: u16 },
+    Drag { x: u16, y: u16 },
+    Scroll { dy: i16 },
+    Move { x: u16, y: u16 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action {
     MoveLeft,
@@ -341,6 +348,8 @@ impl Action {
             Action::TerminalScrollDown => "Scroll terminal down",
             Action::TerminalCyclePosition => "Cycle terminal position",
             Action::Noop | Action::NoOp => "No operation",
+            #[allow(unreachable_patterns)]
+            _ => "Unknown action",
         }
     }
 
@@ -367,8 +376,9 @@ impl Action {
             | Action::DeleteLine | Action::DeleteToEndOfLine
             | Action::Indent | Action::IndentLine | Action::Unindent | Action::UnindentLine
             | Action::DuplicateLine | Action::MoveLineUp | Action::MoveLineDown
-            | Action::JoinLines | Action::ToggleComment
-            | Action::Undo | Action::Redo => ActionCategory::Editing,
+            | Action::JoinLines | Action::ToggleComment => ActionCategory::Editing,
+
+            Action::Undo | Action::Redo => ActionCategory::UndoRedo,
 
             Action::SaveFile | Action::SaveAs | Action::SaveFileAs | Action::CloseFile | Action::CloseBuffer
             | Action::OpenFile | Action::OpenFileAt(..) | Action::NewFile
@@ -433,31 +443,53 @@ impl Action {
             | Action::TerminalCyclePosition => ActionCategory::Terminal,
 
             Action::Noop | Action::NoOp | Action::Quit | Action::ForceQuit => ActionCategory::Application,
+            #[allow(unreachable_patterns)]
+            _ => ActionCategory::Other,
+        }
+    }
+
+    pub fn from_key_with_modifiers(code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> Option<Self> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let alt_only = mods.contains(KeyModifiers::ALT) && !mods.contains(KeyModifiers::CONTROL);
+        let shift_only = mods.contains(KeyModifiers::SHIFT)
+            && !mods.contains(KeyModifiers::CONTROL)
+            && !mods.contains(KeyModifiers::ALT);
+        let ctrl_shift = ctrl && mods.contains(KeyModifiers::SHIFT) && !mods.contains(KeyModifiers::ALT);
+        match (code, ctrl, alt_only, shift_only, ctrl_shift) {
+            (KeyCode::Char('q'), true, false, false, false) => Some(Action::Quit),
+            (KeyCode::Char('q'), true, false, false, true) => Some(Action::ForceQuit),
+            (KeyCode::Char('s'), true, false, false, false) => Some(Action::SaveFile),
+            (KeyCode::Char('s'), true, false, false, true) => Some(Action::SaveFileAs),
+            (KeyCode::Char('z'), true, false, false, false) => Some(Action::Undo),
+            (KeyCode::Char('y'), true, false, false, false) => Some(Action::Redo),
+            (KeyCode::Char('f'), true, false, false, false) => Some(Action::Find),
+            (KeyCode::Char('p'), true, false, false, false) => Some(Action::ShowPalette),
+            (KeyCode::Char('n'), true, false, false, false) => Some(Action::NewFile),
+            (KeyCode::Char('w'), true, false, false, false) => Some(Action::CloseFile),
+            (KeyCode::Char('c'), true, false, false, false) => Some(Action::Copy),
+            (KeyCode::Char('x'), true, false, false, false) => Some(Action::Cut),
+            (KeyCode::Char('v'), true, false, false, false) => Some(Action::Paste),
+            (KeyCode::Char('a'), true, false, false, false) => Some(Action::SelectAll),
+            (KeyCode::Char('r'), true, false, false, false) => Some(Action::Replace),
+            (KeyCode::Up, true, false, false, false) => Some(Action::ScrollUp),
+            (KeyCode::Down, true, false, false, false) => Some(Action::ScrollDown),
+            (KeyCode::Tab, false, false, false, false) => Some(Action::NextBuffer),
+            (KeyCode::BackTab, false, false, false, false) => Some(Action::PreviousBuffer),
+            _ => None,
         }
     }
 
     pub fn from_key_code(code: crossterm::event::KeyCode, ctrl: bool, alt: bool) -> Option<Self> {
-        use crossterm::event::KeyCode;
-        match (code, ctrl, alt) {
-            (KeyCode::Char('q'), true, false) => Some(Action::Quit),
-            (KeyCode::Char('s'), true, false) => Some(Action::SaveFile),
-            (KeyCode::Char('z'), true, false) => Some(Action::Undo),
-            (KeyCode::Char('y'), true, false) => Some(Action::Redo),
-            (KeyCode::Char('f'), true, false) => Some(Action::Find),
-            (KeyCode::Char('p'), true, false) => Some(Action::ShowPalette),
-            (KeyCode::Char('n'), true, false) => Some(Action::NewFile),
-            (KeyCode::Char('w'), true, false) => Some(Action::CloseFile),
-            (KeyCode::Char('c'), true, false) => Some(Action::Copy),
-            (KeyCode::Char('x'), true, false) => Some(Action::Cut),
-            (KeyCode::Char('v'), true, false) => Some(Action::Paste),
-            (KeyCode::Char('a'), true, false) => Some(Action::SelectAll),
-            (KeyCode::Char('r'), true, false) => Some(Action::Replace),
-            (KeyCode::Up, true, false) => Some(Action::ScrollUp),
-            (KeyCode::Down, true, false) => Some(Action::ScrollDown),
-            (KeyCode::Tab, false, false) => Some(Action::NextBuffer),
-            (KeyCode::BackTab, false, false) => Some(Action::PreviousBuffer),
-            _ => None,
+        use crossterm::event::KeyModifiers;
+        let mut mods = KeyModifiers::NONE;
+        if ctrl {
+            mods |= KeyModifiers::CONTROL;
         }
+        if alt {
+            mods |= KeyModifiers::ALT;
+        }
+        Self::from_key_with_modifiers(code, mods)
     }
 }
 
@@ -479,4 +511,5 @@ pub enum ActionCategory {
     Terminal,
     Application,
     Custom,
+    Other,
 }

@@ -3,6 +3,89 @@ use crate::core::EditMode;
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
+pub fn is_alt_only(mods: KeyModifiers) -> bool {
+    mods.contains(KeyModifiers::ALT) && !mods.contains(KeyModifiers::CONTROL)
+}
+
+#[cfg(unix)]
+pub fn disable_flow_control() {}
+
+#[cfg(not(unix))]
+pub fn disable_flow_control() {}
+
+pub fn parse_key_str(s: &str) -> Option<KeyEvent> {
+    let s = s.trim();
+    if s.is_empty() {
+        tracing::warn!("unknown key: empty string");
+        return None;
+    }
+    let mut mods = KeyModifiers::NONE;
+    let lower = s.to_lowercase();
+    let parts: Vec<&str> = lower.split('+').collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let key_str = parts.last().copied().unwrap_or("");
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        match *part {
+            "ctrl" | "control" => mods |= KeyModifiers::CONTROL,
+            "alt" | "meta" => mods |= KeyModifiers::ALT,
+            "shift" => mods |= KeyModifiers::SHIFT,
+            _ => {
+                tracing::warn!("unknown key modifier: {}", part);
+                return None;
+            }
+        }
+    }
+    let code = match key_str {
+        "esc" | "escape" => Some(KeyCode::Esc),
+        "enter" | "return" | "cr" => Some(KeyCode::Enter),
+        "tab" => Some(KeyCode::Tab),
+        "backtab" | "shift+tab" => Some(KeyCode::BackTab),
+        "backspace" | "bs" => Some(KeyCode::Backspace),
+        "delete" | "del" => Some(KeyCode::Delete),
+        "space" => Some(KeyCode::Char(' ')),
+        "up" => Some(KeyCode::Up),
+        "down" => Some(KeyCode::Down),
+        "left" => Some(KeyCode::Left),
+        "right" => Some(KeyCode::Right),
+        "home" => Some(KeyCode::Home),
+        "end" => Some(KeyCode::End),
+        "pageup" | "pgup" => Some(KeyCode::PageUp),
+        "pagedown" | "pgdn" => Some(KeyCode::PageDown),
+        _ if key_str.starts_with('f') && key_str.len() > 1 => {
+            if let Ok(n) = key_str[1..].parse::<u8>() {
+                if (1..=12).contains(&n) {
+                    Some(KeyCode::F(n))
+                } else {
+                    tracing::warn!("unknown key: {}", s);
+                    None
+                }
+            } else {
+                tracing::warn!("unknown key: {}", s);
+                None
+            }
+        }
+        _ if key_str.chars().count() == 1 => {
+            let c = key_str.chars().next().unwrap();
+            if mods.contains(KeyModifiers::SHIFT) {
+                if c.is_ascii_lowercase() {
+                    Some(KeyCode::Char(c.to_ascii_uppercase()))
+                } else {
+                    Some(KeyCode::Char(c))
+                }
+            } else {
+                Some(KeyCode::Char(c))
+            }
+        }
+        _ => {
+            tracing::warn!("unknown key: {}", s);
+            None
+        }
+    }?;
+    Some(KeyEvent::new(code, mods))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyBinding {
     pub key: KeyEvent,
@@ -252,8 +335,14 @@ impl KeyMap {
             }
         }
 
+        if matches!(key.code, KeyCode::Esc) && !self.pending_keys.is_empty() {
+            self.pending_keys.clear();
+            self.last_key_time = Some(now);
+            return None;
+        }
+
         if !self.pending_keys.is_empty() {
-            let first = &self.pending_keys[0];
+            let first = self.pending_keys[0];
             let combo = (first.code, key.code, mode);
             if let Some(action) = self.sequence_bindings.get(&combo) {
                 self.pending_keys.clear();
@@ -266,7 +355,18 @@ impl KeyMap {
                 self.last_key_time = None;
                 return Some(action.clone());
             }
+            let leader = self.pending_keys[0];
             self.pending_keys.clear();
+            if let Some(leader_action) = self.bindings.get(&(leader, mode)).cloned() {
+                self.last_key_time = Some(now);
+                return Some(leader_action);
+            }
+            if let Some(leader_action) = self.bindings.get(&(leader, None)).cloned() {
+                self.last_key_time = Some(now);
+                return Some(leader_action);
+            }
+            self.last_key_time = Some(now);
+            return None;
         }
 
         let direct = self.bindings.get(&(key, mode));
@@ -287,19 +387,6 @@ impl KeyMap {
             return None;
         }
 
-        if key.code == KeyCode::Char('d') || key.code == KeyCode::Char('y') || key.code == KeyCode::Char('c') {
-            let combo = (key.code, key.code, mode);
-            if let Some(action) = self.sequence_bindings.get(&combo) {
-                self.last_key_time = Some(now);
-                return Some(action.clone());
-            }
-            let combo_none = (key.code, key.code, None);
-            if let Some(action) = self.sequence_bindings.get(&combo_none) {
-                self.last_key_time = Some(now);
-                return Some(action.clone());
-            }
-        }
-
         self.last_key_time = Some(now);
         None
     }
@@ -317,8 +404,14 @@ impl KeyMap {
     }
 
     pub fn load_from_config(&mut self, config: &[(KeyEvent, Action, Option<EditMode>)]) {
+        let mut seen = std::collections::HashSet::new();
         for (key, action, mode) in config {
-            self.bindings.insert((*key, *mode), action.clone());
+            let composite = (*key, *mode);
+            if seen.contains(&composite) {
+                tracing::warn!("duplicate keybinding for {:?} in mode {:?}", key, mode);
+            }
+            seen.insert(composite);
+            self.bindings.insert(composite, action.clone());
         }
     }
 

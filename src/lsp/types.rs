@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use lsp_types::{Position as LspPosition, Diagnostic as LspDiagnostic, CompletionItem as LspCompletionItem};
 
@@ -164,10 +164,17 @@ pub fn lsp_position_from_editor(line: usize, col: usize, line_text: &str) -> Lsp
     LspPosition::new(line as u32, char_offset_to_utf16(line_text, col))
 }
 
+pub fn try_path_to_uri(path: &Path) -> anyhow::Result<lsp_types::Url> {
+    let abs = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => std::env::current_dir().map(|cwd| cwd.join(path))?,
+    };
+    lsp_types::Url::from_file_path(&abs)
+        .map_err(|_| anyhow::anyhow!("invalid file path for URI: {:?}", abs))
+}
+
 pub fn path_to_uri(path: &PathBuf) -> lsp_types::Url {
-    // Canonicalize to get absolute path, since Url::from_file_path requires absolute paths.
-    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-    lsp_types::Url::from_file_path(&abs).expect("valid path after canonicalization")
+    try_path_to_uri(path).expect("invalid path for URI")
 }
 
 pub fn uri_to_path(uri: &lsp_types::Url) -> Option<PathBuf> {

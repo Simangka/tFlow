@@ -57,6 +57,10 @@ impl CompletionHandler {
             }
         };
 
+        if self.is_stale(generation) {
+            return None;
+        }
+
         let (items, is_incomplete) = match response {
             CompletionResponse::List(list) => {
                 let items: Vec<CompletionItem> = list.items.into_iter()

@@ -1,4 +1,8 @@
+use std::sync::OnceLock;
+
 use pulldown_cmark::{Parser, Event, Tag, TagEnd, HeadingLevel, CodeBlockKind, CowStr};
+
+use super::prepare_md;
 
 #[derive(Debug, Clone)]
 pub struct MarkdownEvent {
@@ -29,6 +33,8 @@ impl MarkdownParser {
     }
 
     pub fn parse(&self, text: &str) -> ParsedMarkdown {
+        let prepared = prepare_md(text);
+        let text: &str = &prepared;
         let mut events = Vec::new();
         let mut headings = Vec::new();
         let mut current_heading_text = String::new();
@@ -58,7 +64,7 @@ impl MarkdownParser {
                 Event::End(tag_end) => {
                     if let TagEnd::Heading(_) = tag_end {
                         if in_heading {
-                            let line = text[..start_offset].chars().filter(|&c| c == '\n').count();
+                            let line = text[..start_offset].matches('\n').count();
                             headings.push(MarkdownHeading {
                                 level: current_heading_level,
                                 text: current_heading_text.clone(),
@@ -104,24 +110,23 @@ impl MarkdownParser {
     }
 
     pub fn extract_headings(text: &str) -> Vec<MarkdownHeading> {
+        let prepared = prepare_md(text);
+        let text: &str = &prepared;
         let parser = MarkdownParser::new();
         let parsed = parser.parse(text);
         parsed.headings
     }
 
     pub fn extract_tables(text: &str) -> Vec<Vec<Vec<String>>> {
+        let prepared = prepare_md(text);
+        let text: &str = &prepared;
         let mut tables = Vec::new();
         let mut current_table: Vec<Vec<String>> = Vec::new();
         let mut in_table = false;
 
         for line in text.lines() {
             if line.trim_start().starts_with('|') {
-                let cells: Vec<String> = line
-                    .split('|')
-                    .skip(1)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.trim().to_string())
-                    .collect();
+                let cells = split_table_row(line);
                 if !in_table {
                     in_table = true;
                     current_table = Vec::new();
@@ -146,14 +151,15 @@ impl MarkdownParser {
     }
 
     pub fn extract_code_blocks(text: &str) -> Vec<(Option<String>, String)> {
+        let prepared = prepare_md(text);
+        let text: &str = &prepared;
         let mut blocks = Vec::new();
         let mut in_block = false;
         let mut lang = None;
         let mut code = String::new();
 
         for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("```") {
+            if line.starts_with("```") {
                 if in_block {
                     blocks.push((lang.take(), code.clone()));
                     code.clear();
@@ -161,7 +167,7 @@ impl MarkdownParser {
                     lang = None;
                 } else {
                     in_block = true;
-                    let rest = trimmed.trim_start_matches("```").trim();
+                    let rest = line[3..].trim();
                     if !rest.is_empty() {
                         lang = Some(rest.to_string());
                     }
@@ -180,8 +186,10 @@ impl MarkdownParser {
     }
 
     pub fn extract_checkboxes(text: &str) -> Vec<(usize, bool, String)> {
+        let prepared = prepare_md(text);
+        let text: &str = &prepared;
         let mut checkboxes = Vec::new();
-        let re = regex::Regex::new(r"^\s*[-*+]\s+\[([ xX])\]\s+(.*)").unwrap();
+        let re = checkbox_regex();
 
         for (line_idx, line) in text.lines().enumerate() {
             if let Some(caps) = re.captures(line) {
@@ -196,6 +204,44 @@ impl MarkdownParser {
 
         checkboxes
     }
+}
+
+fn checkbox_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"^\s*[-*+]\s+\[([ xX])\]\s+(.*)").expect("invalid regex"))
+}
+
+fn split_table_row(line: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    if chars.peek() == Some(&'|') {
+        chars.next();
+    }
+    loop {
+        let Some(c) = chars.next() else { break };
+        if c == '\\' {
+            if chars.peek() == Some(&'|') {
+                current.push('|');
+                chars.next();
+            } else {
+                current.push('\\');
+            }
+        } else if c == '|' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                cells.push(trimmed);
+            }
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        cells.push(trimmed);
+    }
+    cells
 }
 
 fn tag_to_owned(tag: Tag) -> Tag<'static> {
@@ -225,9 +271,30 @@ fn tag_to_owned(tag: Tag) -> Tag<'static> {
             };
             Tag::CodeBlock(kind)
         }
+        Tag::HtmlBlock => {
+            tracing::warn!("markdown: unknown tag {:?}", Tag::HtmlBlock);
+            Tag::Paragraph
+        }
         Tag::List(ord) => Tag::List(ord),
         Tag::Item => Tag::Item,
+        Tag::FootnoteDefinition(name) => Tag::FootnoteDefinition(CowStr::Boxed(name.to_string().into())),
+        Tag::DefinitionList => {
+            tracing::warn!("markdown: unknown tag {:?}", Tag::DefinitionList);
+            Tag::Paragraph
+        }
+        Tag::DefinitionListTitle => {
+            tracing::warn!("markdown: unknown tag {:?}", Tag::DefinitionListTitle);
+            Tag::Paragraph
+        }
+        Tag::DefinitionListDefinition => {
+            tracing::warn!("markdown: unknown tag {:?}", Tag::DefinitionListDefinition);
+            Tag::Paragraph
+        }
         Tag::Table(alignments) => Tag::Table(alignments),
+        Tag::TableHead => {
+            tracing::warn!("markdown: unknown tag {:?}", Tag::TableHead);
+            Tag::Paragraph
+        }
         Tag::TableRow => Tag::TableRow,
         Tag::TableCell => Tag::TableCell,
         Tag::Emphasis => Tag::Emphasis,
@@ -245,9 +312,12 @@ fn tag_to_owned(tag: Tag) -> Tag<'static> {
             title: CowStr::Boxed(title.to_string().into()),
             id: CowStr::Boxed(id.to_string().into()),
         },
-        Tag::FootnoteDefinition(name) => Tag::FootnoteDefinition(CowStr::Boxed(name.to_string().into())),
         Tag::MetadataBlock(kind) => Tag::MetadataBlock(kind),
-        _ => Tag::Paragraph,
+        #[allow(unreachable_patterns)]
+        _ => {
+            tracing::warn!("markdown: unknown tag {:?}", tag);
+            Tag::Paragraph
+        }
     }
 }
 
@@ -257,9 +327,30 @@ fn tag_end_to_owned(tag_end: TagEnd) -> TagEnd {
         TagEnd::Heading(level) => TagEnd::Heading(level),
         TagEnd::BlockQuote(kind) => TagEnd::BlockQuote(kind),
         TagEnd::CodeBlock => TagEnd::CodeBlock,
+        TagEnd::HtmlBlock => {
+            tracing::warn!("markdown: unknown tag end {:?}", TagEnd::HtmlBlock);
+            TagEnd::Paragraph
+        }
         TagEnd::List(ord) => TagEnd::List(ord),
         TagEnd::Item => TagEnd::Item,
+        TagEnd::FootnoteDefinition => TagEnd::FootnoteDefinition,
+        TagEnd::DefinitionList => {
+            tracing::warn!("markdown: unknown tag end {:?}", TagEnd::DefinitionList);
+            TagEnd::Paragraph
+        }
+        TagEnd::DefinitionListTitle => {
+            tracing::warn!("markdown: unknown tag end {:?}", TagEnd::DefinitionListTitle);
+            TagEnd::Paragraph
+        }
+        TagEnd::DefinitionListDefinition => {
+            tracing::warn!("markdown: unknown tag end {:?}", TagEnd::DefinitionListDefinition);
+            TagEnd::Paragraph
+        }
         TagEnd::Table => TagEnd::Table,
+        TagEnd::TableHead => {
+            tracing::warn!("markdown: unknown tag end {:?}", TagEnd::TableHead);
+            TagEnd::Paragraph
+        }
         TagEnd::TableRow => TagEnd::TableRow,
         TagEnd::TableCell => TagEnd::TableCell,
         TagEnd::Emphasis => TagEnd::Emphasis,
@@ -267,8 +358,11 @@ fn tag_end_to_owned(tag_end: TagEnd) -> TagEnd {
         TagEnd::Strikethrough => TagEnd::Strikethrough,
         TagEnd::Link => TagEnd::Link,
         TagEnd::Image => TagEnd::Image,
-        TagEnd::FootnoteDefinition => TagEnd::FootnoteDefinition,
         TagEnd::MetadataBlock(kind) => TagEnd::MetadataBlock(kind),
-        _ => TagEnd::Paragraph,
+        #[allow(unreachable_patterns)]
+        _ => {
+            tracing::warn!("markdown: unknown tag end {:?}", tag_end);
+            TagEnd::Paragraph
+        }
     }
 }

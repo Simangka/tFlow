@@ -1,5 +1,8 @@
 use ratatui::style::{Style, Modifier};
 use crate::theme::Theme;
+use super::prepare_md;
+
+const MAX_CODE_LINES: usize = 10_000;
 
 #[derive(Clone)]
 pub struct MarkdownRenderLine {
@@ -14,6 +17,8 @@ pub struct MarkdownRenderer;
 
 impl MarkdownRenderer {
     pub fn render(text: &str, theme: &Theme) -> Vec<MarkdownRenderLine> {
+        let prepared = prepare_md(text);
+        let text: &str = &prepared;
         let lines: Vec<&str> = text.lines().collect();
         let total = lines.len();
         let mut result = Vec::with_capacity(total);
@@ -73,39 +78,50 @@ impl MarkdownRenderer {
                 continue;
             }
 
-            if trimmed.starts_with("```") {
-                let _lang = trimmed.trim_start_matches("```").trim();
+            if raw.starts_with("```") {
+                let _lang = raw.trim_start_matches('`').trim();
                 let mut code_lines = vec![MarkdownRenderLine {
                     content: raw.to_string(),
                     style: Style::default().fg(theme.code_block).bg(theme.bg),
                     indent: 0, is_heading: false, heading_level: 0,
                 }];
                 i += 1;
-                while i < total && !lines[i].trim().starts_with("```") {
+                let mut count: usize = 0;
+                while i < total {
+                    if count >= MAX_CODE_LINES {
+                        code_lines.push(MarkdownRenderLine {
+                            content: "[truncated]".to_string(),
+                            style: Style::default().fg(theme.comment).bg(theme.bg),
+                            indent: 0, is_heading: false, heading_level: 0,
+                        });
+                        break;
+                    }
+                    if lines[i].starts_with("```") {
+                        code_lines.push(MarkdownRenderLine {
+                            content: lines[i].to_string(),
+                            style: Style::default().fg(theme.code_block).bg(theme.bg),
+                            indent: 0, is_heading: false, heading_level: 0,
+                        });
+                        i += 1;
+                        break;
+                    }
                     code_lines.push(MarkdownRenderLine {
                         content: lines[i].to_string(),
                         style: Style::default().fg(theme.code_block).bg(theme.bg),
                         indent: 0, is_heading: false, heading_level: 0,
                     });
                     i += 1;
-                }
-                if i < total {
-                    code_lines.push(MarkdownRenderLine {
-                        content: lines[i].to_string(),
-                        style: Style::default().fg(theme.code_block).bg(theme.bg),
-                        indent: 0, is_heading: false, heading_level: 0,
-                    });
-                    i += 1;
+                    count += 1;
                 }
                 result.extend(code_lines);
                 continue;
             }
 
-            if let Some((prefix, task_checked)) = list_item_prefix(trimmed) {
+            if let Some(prefix) = list_item_prefix(trimmed) {
                 let indent = raw.len() - raw.trim_start().len();
                 let style = Style::default().fg(theme.list).bg(theme.bg);
-                let display = if task_checked.is_some() {
-                    let checked = task_checked.unwrap();
+                let display = if prefix.starts_with("- [") {
+                    let checked = prefix.contains("[x]");
                     let marker = if checked { "[x]" } else { "[ ]" };
                     let prefix_len = prefix.len();
                     if raw.len() > prefix_len {
@@ -162,27 +178,22 @@ fn heading_prefix(s: &str) -> Option<u8> {
     None
 }
 
-fn list_item_prefix(s: &str) -> Option<(&'static str, Option<bool>)> {
+fn list_item_prefix(s: &str) -> Option<String> {
     let t = s.trim_start();
-    if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") {
-        return Some(("- ", None));
-    }
     if t.starts_with("- [ ] ") {
-        return Some(("- [ ] ", Some(false)));
+        return Some("- [ ] ".to_string());
     }
     if t.starts_with("- [x] ") || t.starts_with("- [X] ") {
-        return Some(("- [x] ", Some(true)));
+        return Some("- [x] ".to_string());
     }
-    if t.len() > 2 {
-        let first = t.chars().next()?;
-        if first.is_ascii_digit() {
-            let rest = &t[1..];
-            let dot = rest.starts_with(". ");
-            let paren = rest.starts_with(") ");
-            if dot || paren {
-                return Some(("1. ", None));
-            }
-        }
+    if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") {
+        let bullet = t.chars().next().unwrap();
+        return Some(format!("{} ", bullet));
     }
-    None
+    let prefix: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ')' || *c == ' ').collect();
+    if prefix.chars().any(|c| c.is_ascii_digit()) {
+        Some(format!("{} ", prefix.trim_end()))
+    } else {
+        None
+    }
 }

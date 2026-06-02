@@ -86,6 +86,37 @@ impl SplitNode {
             _ => false,
         }
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            SplitNode::Vertical { children, ratios } | SplitNode::Horizontal { children, ratios } => {
+                if children.is_empty() {
+                    return Err("split node has no children".to_string());
+                }
+                if children.len() != ratios.len() {
+                    return Err(format!(
+                        "child/ratio count mismatch: {} children, {} ratios",
+                        children.len(),
+                        ratios.len()
+                    ));
+                }
+                let sum: f32 = ratios.iter().sum();
+                if sum <= 0.0 {
+                    return Err("ratios sum is not positive".to_string());
+                }
+                for (i, child) in children.iter().enumerate() {
+                    child.validate().map_err(|e| format!("child[{}]: {}", i, e))?;
+                }
+                Ok(())
+            }
+            SplitNode::Pane(p) => {
+                if p.id == usize::MAX {
+                    return Err("pane has sentinel id usize::MAX".to_string());
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 fn distribute_horizontal(area: Rect, ratios: &[f32]) -> Vec<Rect> {
@@ -94,7 +125,12 @@ fn distribute_horizontal(area: Rect, ratios: &[f32]) -> Vec<Rect> {
     }
     let total: f32 = ratios.iter().sum();
     if total == 0.0 {
-        return vec![area];
+        let each = (area.width / ratios.len() as u16).max(1);
+        return ratios
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Rect::new(area.x + (each * i as u16), area.y, each, area.height))
+            .collect();
     }
     let mut result = Vec::new();
     let mut offset = 0.0f32;
@@ -102,7 +138,7 @@ fn distribute_horizontal(area: Rect, ratios: &[f32]) -> Vec<Rect> {
         let frac = ratio / total;
         let begin = (area.width as f32 * offset).round() as u16;
         let end = (area.width as f32 * (offset + frac)).round() as u16;
-        let w = end.saturating_sub(begin).max(10);
+        let w = end.saturating_sub(begin).max(1);
         result.push(Rect::new(area.x + begin, area.y, w, area.height));
         offset += frac;
     }
@@ -115,7 +151,12 @@ fn distribute_vertical(area: Rect, ratios: &[f32]) -> Vec<Rect> {
     }
     let total: f32 = ratios.iter().sum();
     if total == 0.0 {
-        return vec![area];
+        let each = (area.height / ratios.len() as u16).max(1);
+        return ratios
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Rect::new(area.x, area.y + (each * i as u16), area.width, each))
+            .collect();
     }
     let mut result = Vec::new();
     let mut offset = 0.0f32;
@@ -123,7 +164,7 @@ fn distribute_vertical(area: Rect, ratios: &[f32]) -> Vec<Rect> {
         let frac = ratio / total;
         let begin = (area.height as f32 * offset).round() as u16;
         let end = (area.height as f32 * (offset + frac)).round() as u16;
-        let h = end.saturating_sub(begin).max(3);
+        let h = end.saturating_sub(begin).max(1);
         result.push(Rect::new(area.x, area.y + begin, area.width, h));
         offset += frac;
     }
@@ -133,7 +174,8 @@ fn distribute_vertical(area: Rect, ratios: &[f32]) -> Vec<Rect> {
 pub fn layout_split_node(node: &SplitNode, area: Rect) -> Vec<(usize, Rect)> {
     match node {
         SplitNode::Horizontal { children, ratios } => {
-            let rects = distribute_horizontal(area, ratios);
+            let ratios = normalize_ratios(ratios, children.len());
+            let rects = distribute_horizontal(area, &ratios);
             let mut out = Vec::new();
             for (child, rect) in children.iter().zip(rects.iter()) {
                 out.extend(layout_split_node(child, *rect));
@@ -141,7 +183,8 @@ pub fn layout_split_node(node: &SplitNode, area: Rect) -> Vec<(usize, Rect)> {
             out
         }
         SplitNode::Vertical { children, ratios } => {
-            let rects = distribute_vertical(area, ratios);
+            let ratios = normalize_ratios(ratios, children.len());
+            let rects = distribute_vertical(area, &ratios);
             let mut out = Vec::new();
             for (child, rect) in children.iter().zip(rects.iter()) {
                 out.extend(layout_split_node(child, *rect));
@@ -150,6 +193,29 @@ pub fn layout_split_node(node: &SplitNode, area: Rect) -> Vec<(usize, Rect)> {
         }
         SplitNode::Pane(p) => vec![(p.id, area)],
     }
+}
+
+fn normalize_ratios(ratios: &[f32], target: usize) -> Vec<f32> {
+    if target == 0 {
+        return Vec::new();
+    }
+    if ratios.len() == target {
+        return ratios.to_vec();
+    }
+    let mut out = ratios.to_vec();
+    if out.len() < target {
+        let avg = if out.is_empty() {
+            1.0
+        } else {
+            out.iter().sum::<f32>() / out.len() as f32
+        };
+        while out.len() < target {
+            out.push(avg);
+        }
+    } else {
+        out.truncate(target);
+    }
+    out
 }
 
 pub struct SplitManager {
@@ -256,8 +322,11 @@ impl SplitManager {
             }
         }
         close_in_node(&mut self.root, id, &mut buffer_id);
-        if self.active_pane_id == id {
-            self.active_pane_id = self.root.leaf_ids().first().copied().unwrap_or(0);
+        let leaves = self.root.leaf_ids();
+        if !leaves.contains(&self.active_pane_id) {
+            if let Some(&first) = leaves.first() {
+                self.active_pane_id = first;
+            }
         }
         buffer_id
     }

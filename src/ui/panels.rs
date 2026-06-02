@@ -6,6 +6,7 @@ use ratatui::{
     text::Line as TextLine,
     text::Span,
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 use crate::commands::palette::{CommandPalette, PaletteMode, PaletteItem};
@@ -101,10 +102,14 @@ impl PanelManager {
             .collect();
 
         let start_idx = palette.selected.saturating_sub(5);
+        if inner.height < 3 {
+            return;
+        }
+        let take = (inner.height as usize).saturating_sub(2);
         let visible_items: Vec<&PaletteItem> = palette_items
             .iter()
             .skip(start_idx)
-            .take(inner.height as usize - 2)
+            .take(take)
             .copied()
             .collect();
 
@@ -208,7 +213,11 @@ impl PanelManager {
         active: usize,
         theme: &Theme,
     ) {
-        if area.width == 0 || area.height == 0 || buffers.is_empty() {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if buffers.is_empty() {
+            frame.render_widget(Block::default(), area);
             return;
         }
 
@@ -244,10 +253,21 @@ impl PanelManager {
                     .bg(theme.tab_bg)
             };
 
-            if tab_text.len() > remaining_width {
-                let truncated: String = tab_text.chars().take(remaining_width.saturating_sub(2)).collect();
+            let tab_width = UnicodeWidthStr_width(&tab_text);
+            if tab_width > remaining_width {
+                let max_width = remaining_width.saturating_sub(2);
+                let mut acc = String::new();
+                let mut width_used = 0usize;
+                for c in tab_text.chars() {
+                    let w = UnicodeWidthChar::width(c).unwrap_or(0);
+                    if width_used + w > max_width {
+                        break;
+                    }
+                    acc.push(c);
+                    width_used += w;
+                }
                 spans.push(Span::styled(
-                    format!("{}…", truncated),
+                    format!("{}…", acc),
                     tab_style,
                 ));
                 break;
@@ -262,7 +282,7 @@ impl PanelManager {
             }
 
             spans.push(Span::styled(tab_text.clone(), tab_style));
-            remaining_width = remaining_width.saturating_sub(tab_text.len());
+            remaining_width = remaining_width.saturating_sub(tab_width);
             separator = true;
         }
 
@@ -270,4 +290,9 @@ impl PanelManager {
         let paragraph = Paragraph::new(vec![line]).style(style);
         frame.render_widget(paragraph, area);
     }
+}
+
+fn UnicodeWidthStr_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(s)
 }

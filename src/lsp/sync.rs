@@ -55,10 +55,15 @@ impl DocumentSyncState {
     pub fn apply_change(&mut self, change: &TextDocumentContentChangeEvent) {
         self.version += 1;
         if let Some(range) = change.range {
-            let start = self.lsp_to_rope_pos(range.start);
-            let end = self.lsp_to_rope_pos(range.end);
-            let start_idx = self.rope.line_to_char(start.0) + start.1;
-            let end_idx = self.rope.line_to_char(end.0) + end.1;
+            let mut start_idx = self.lsp_to_rope_idx(range.start);
+            let mut end_idx = self.lsp_to_rope_idx(range.end);
+            let len = self.rope.len_chars();
+            if start_idx > len {
+                start_idx = len;
+            }
+            if end_idx > len {
+                end_idx = len;
+            }
             if end_idx > start_idx {
                 self.rope.remove(start_idx..end_idx);
             }
@@ -79,13 +84,22 @@ impl DocumentSyncState {
         self.rope = Rope::from_str(&text);
     }
 
-    fn lsp_to_rope_pos(&self, pos: lsp_types::Position) -> (usize, usize) {
-        let line = pos.line as usize;
-        let col = pos.character as usize;
-        if line >= self.rope.len_lines() {
-            return (self.rope.len_lines().saturating_sub(1), 0);
-        }
+    fn lsp_to_rope_idx(&self, pos: lsp_types::Position) -> usize {
+        let line_count = self.rope.len_lines();
+        let line = (pos.line as usize).min(line_count.saturating_sub(1));
         let line_text = self.rope.line(line).to_string();
+        let line_chars = line_text.chars().count();
+        let col = (pos.character as usize).min(line_chars);
+        let rope_col = crate::lsp::types::utf16_to_char_offset(&line_text, col as u32);
+        self.rope.line_to_char(line) + rope_col
+    }
+
+    fn lsp_to_rope_pos(&self, pos: lsp_types::Position) -> (usize, usize) {
+        let line_count = self.rope.len_lines();
+        let line = (pos.line as usize).min(line_count.saturating_sub(1));
+        let line_text = self.rope.line(line).to_string();
+        let max_col = line_text.chars().count();
+        let col = (pos.character as usize).min(max_col);
         let rope_col = crate::lsp::types::utf16_to_char_offset(&line_text, col as u32);
         (line, rope_col)
     }

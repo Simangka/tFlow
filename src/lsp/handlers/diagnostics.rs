@@ -16,6 +16,7 @@ pub struct DiagnosticsHandler {
     pending: HashMap<DocumentId, PendingDiagnostics>,
     debounce_ms: u64,
     last_emit: HashMap<DocumentId, Instant>,
+    versions: HashMap<DocumentId, i32>,
     cache: Arc<LspCache>,
 }
 
@@ -25,11 +26,22 @@ impl DiagnosticsHandler {
             pending: HashMap::new(),
             debounce_ms: config.diagnostics_debounce_ms,
             last_emit: HashMap::new(),
+            versions: HashMap::new(),
             cache,
         }
     }
 
-    pub fn push_diagnostics(&mut self, doc_id: DocumentId, diagnostics: Vec<Diagnostic>) {
+    pub fn push_diagnostics(&mut self, doc_id: DocumentId, diagnostics: Vec<Diagnostic>, version: Option<i32>) {
+        let new_version = version.unwrap_or(-1);
+        if new_version >= 0 {
+            if let Some(&cached_version) = self.versions.get(&doc_id) {
+                if new_version < cached_version {
+                    tracing::debug!(doc_id = %doc_id, incoming = new_version, cached = cached_version, "ignoring stale diagnostics");
+                    return;
+                }
+            }
+            self.versions.insert(doc_id, new_version);
+        }
         self.pending.insert(doc_id, PendingDiagnostics {
             doc_id,
             diagnostics,
@@ -75,10 +87,15 @@ impl DiagnosticsHandler {
     pub fn clear(&mut self, doc_id: DocumentId) {
         self.pending.remove(&doc_id);
         self.last_emit.remove(&doc_id);
-        self.cache.diagnostics.remove(&doc_id);
+        self.versions.remove(&doc_id);
+        self.remove_diagnostics_from_cache(doc_id);
     }
 
     pub fn has_pending(&self, doc_id: DocumentId) -> bool {
         self.pending.contains_key(&doc_id)
+    }
+
+    fn remove_diagnostics_from_cache(&self, doc_id: DocumentId) {
+        self.cache.diagnostics.remove(&doc_id);
     }
 }

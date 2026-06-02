@@ -1,9 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use crate::workspace::FileEntry;
 
+const MAX_TREE_DEPTH: usize = 32;
+const MAX_ENTRIES_PER_DIR: usize = 50_000;
+const TRUNCATION_SENTINEL_NAME: &str = "[... truncated]";
+const DEFAULT_EXPAND_CAP: usize = 1000;
+
 pub struct TreeDisplayEntry {
-    pub entry: FileEntry,
+    pub entry: Rc<FileEntry>,
     pub connector: String,
     pub icon: String,
     pub display_name: String,
@@ -18,6 +24,7 @@ pub struct FileTree {
     pub show_hidden: bool,
     pub respect_gitignore: bool,
     pub filter: Option<String>,
+    pub follow_symlinks: bool,
 }
 
 impl FileTree {
@@ -30,11 +37,12 @@ impl FileTree {
             show_hidden: false,
             respect_gitignore: true,
             filter: None,
+            follow_symlinks: false,
         }
     }
 
     pub fn refresh(&mut self) -> Result<(), anyhow::Error> {
-        let entries = Self::build_tree(&self.root, 0, self.show_hidden, self.respect_gitignore)?;
+        let entries = Self::build_tree_with(&self.root, 0, self.show_hidden, self.respect_gitignore, self.follow_symlinks)?;
         self.entries = entries;
         if self.selected >= self.visible_entries().len() {
             self.selected = self.visible_entries().len().saturating_sub(1);
@@ -80,11 +88,12 @@ impl FileTree {
         let entry_path = entry.path.clone();
         let show_hidden = self.show_hidden;
         let respect_gitignore = self.respect_gitignore;
+        let follow_symlinks = self.follow_symlinks;
         if let Some(entry_mut) = self.find_entry_mut(&entry_path) {
             let was_expanded = entry_mut.expanded;
             entry_mut.expanded = !was_expanded;
             if entry_mut.expanded && entry_mut.children.is_empty() {
-                match Self::build_tree(&entry_mut.path, entry_mut.depth + 1, show_hidden, respect_gitignore) {
+                match Self::build_tree_with(&entry_mut.path, entry_mut.depth + 1, show_hidden, respect_gitignore, follow_symlinks) {
                     Ok(children) => entry_mut.children = children,
                     Err(_) => {
                         entry_mut.expanded = false;
@@ -119,28 +128,41 @@ impl FileTree {
     }
 
     pub fn expand_all(&mut self) {
-        let show_hidden = self.show_hidden;
-        let respect_gitignore = self.respect_gitignore;
-        let entries = &mut self.entries;
-        Self::expand_recursive(entries, show_hidden, respect_gitignore);
+        self.expand_all_capped(DEFAULT_EXPAND_CAP);
     }
 
-    fn expand_recursive(entries: &mut [FileEntry], show_hidden: bool, respect_gitignore: bool) {
+    pub fn expand_all_capped(&mut self, cap: usize) {
+        let show_hidden = self.show_hidden;
+        let respect_gitignore = self.respect_gitignore;
+        let follow_symlinks = self.follow_symlinks;
+        let entries = &mut self.entries;
+        let mut count: usize = 0;
+        Self::expand_recursive(entries, 0, cap, &mut count, show_hidden, respect_gitignore, follow_symlinks);
+    }
+
+    fn expand_recursive(entries: &mut [FileEntry], depth: usize, cap: usize, count: &mut usize, show_hidden: bool, respect_gitignore: bool, follow_symlinks: bool) {
+        if depth >= MAX_TREE_DEPTH || *count >= cap {
+            return;
+        }
         for entry in entries.iter_mut() {
+            if *count >= cap {
+                break;
+            }
             if entry.is_dir {
                 entry.expanded = true;
+                *count += 1;
                 if entry.children.is_empty() {
-                    if let Ok(children) = Self::build_tree(&entry.path, entry.depth + 1, show_hidden, respect_gitignore) {
+                    if let Ok(children) = Self::build_tree_with(&entry.path, entry.depth + 1, show_hidden, respect_gitignore, follow_symlinks) {
                         entry.children = children;
                     }
                 }
-                Self::expand_recursive(&mut entry.children, show_hidden, respect_gitignore);
+                Self::expand_recursive(&mut entry.children, depth + 1, cap, count, show_hidden, respect_gitignore, follow_symlinks);
             }
         }
     }
 
     pub fn set_root(&mut self, root: PathBuf) {
-        self.root = root;
+        self.root = std::fs::canonicalize(&root).unwrap_or(root);
         self.selected = 0;
         self.scroll_offset = 0;
         let _ = self.refresh();
@@ -185,7 +207,7 @@ impl FileTree {
 
     fn find_entry_recursive<'a>(entries: &'a mut [FileEntry], path: &Path) -> Option<&'a mut FileEntry> {
         for entry in entries.iter_mut() {
-            if entry.path == path {
+            if paths_eq(&entry.path, path) {
                 return Some(entry);
             }
             if entry.expanded {
@@ -198,16 +220,23 @@ impl FileTree {
     }
 
     pub fn build_tree(path: &Path, depth: usize, show_hidden: bool, respect_gitignore: bool) -> Result<Vec<FileEntry>, anyhow::Error> {
-        let mut entries = Vec::new();
-        let gitignore_matcher = if respect_gitignore {
-            build_gitignore_matcher(path)
+        Self::build_tree_with(path, depth, show_hidden, respect_gitignore, false)
+    }
+
+    pub fn build_tree_with(path: &Path, depth: usize, show_hidden: bool, respect_gitignore: bool, follow_symlinks: bool) -> Result<Vec<FileEntry>, anyhow::Error> {
+        if depth >= MAX_TREE_DEPTH {
+            return Ok(Vec::new());
+        }
+
+        let matchers = if respect_gitignore {
+            build_gitignore_matchers_for(path)
         } else {
-            None
+            Vec::new()
         };
 
         let read_dir = match std::fs::read_dir(path) {
             Ok(rd) => rd,
-            Err(_) => return Ok(entries),
+            Err(_) => return Ok(Vec::new()),
         };
 
         let mut dir_entries: Vec<_> = read_dir
@@ -216,37 +245,47 @@ impl FileTree {
                 if show_hidden {
                     return true;
                 }
-                if let Some(name) = e.file_name().to_str() {
-                    !name.starts_with('.')
-                } else {
-                    true
-                }
+                !is_hidden_entry(e)
             })
             .collect();
+
+        let truncated = dir_entries.len() > MAX_ENTRIES_PER_DIR;
+        if truncated {
+            dir_entries.truncate(MAX_ENTRIES_PER_DIR);
+        }
 
         dir_entries.sort_by_key(|e| {
             let is_dir = e.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
             (!is_dir, e.file_name().to_os_string())
         });
 
+        let mut entries: Vec<FileEntry> = Vec::new();
+
         for entry in dir_entries {
             let entry_path = entry.path();
             let file_name = entry.file_name().to_string_lossy().to_string();
 
-            if file_name == ".git" && entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            if file_name == ".git" {
                 continue;
             }
 
-            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
-            let is_gitignored = gitignore_matcher.as_ref().map(|m| m.matched(&entry_path, is_dir).is_ignore()).unwrap_or(false);
+            let file_type = entry.file_type();
+            let raw_is_dir = file_type.as_ref().map(|ft| ft.is_dir()).unwrap_or(false);
+            let is_symlink = file_type.as_ref().map(|ft| ft.is_symlink()).unwrap_or(false);
+            let effective_is_dir = if !follow_symlinks && is_symlink { false } else { raw_is_dir };
+
+            let is_gitignored = if matchers.is_empty() {
+                false
+            } else {
+                matchers.iter().any(|m| m.matched(&entry_path, effective_is_dir).is_ignore())
+            };
 
             let metadata = entry.metadata().ok();
             let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
             let modified = metadata.and_then(|m| m.modified().ok()).unwrap_or_else(|| std::time::SystemTime::UNIX_EPOCH);
 
-            let children = if is_dir {
-                match Self::build_tree(&entry_path, depth + 1, show_hidden, respect_gitignore) {
+            let children = if effective_is_dir {
+                match Self::build_tree_with(&entry_path, depth + 1, show_hidden, respect_gitignore, follow_symlinks) {
                     Ok(child_entries) => child_entries,
                     Err(_) => Vec::new(),
                 }
@@ -257,7 +296,7 @@ impl FileTree {
             entries.push(FileEntry {
                 path: entry_path,
                 name: file_name,
-                is_dir,
+                is_dir: effective_is_dir,
                 is_symlink,
                 depth,
                 expanded: false,
@@ -268,7 +307,30 @@ impl FileTree {
             });
         }
 
+        if truncated {
+            entries.push(FileEntry {
+                path: path.join(TRUNCATION_SENTINEL_NAME),
+                name: TRUNCATION_SENTINEL_NAME.to_string(),
+                is_dir: false,
+                is_symlink: false,
+                depth,
+                expanded: false,
+                children: Vec::new(),
+                is_gitignored: false,
+                size: 0,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+            });
+        }
+
         Ok(entries)
+    }
+
+    pub async fn build_tree_async(path: PathBuf, depth: usize, show_hidden: bool, respect_gitignore: bool, follow_symlinks: bool) -> Result<Vec<FileEntry>, anyhow::Error> {
+        tokio::task::spawn_blocking(move || {
+            Self::build_tree_with(&path, depth, show_hidden, respect_gitignore, follow_symlinks)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("build_tree_async join error: {}", e))?
     }
 
     pub fn is_expandable(entry: &FileEntry) -> bool {
@@ -276,11 +338,12 @@ impl FileTree {
     }
 
     pub fn display_entries(&self) -> Vec<TreeDisplayEntry> {
-        self.build_display(&self.entries, Vec::new())
+        let mut result = Vec::new();
+        Self::build_display(&self.entries, Vec::new(), &mut result);
+        result
     }
 
-    fn build_display(&self, entries: &[FileEntry], ancestry: Vec<bool>) -> Vec<TreeDisplayEntry> {
-        let mut result = Vec::new();
+    fn build_display(entries: &[FileEntry], ancestry: Vec<bool>, result: &mut Vec<TreeDisplayEntry>) {
         let count = entries.len();
         for (i, entry) in entries.iter().enumerate() {
             let is_last = i == count - 1;
@@ -310,8 +373,9 @@ impl FileTree {
                 entry.name.clone()
             };
 
+            let rc = Rc::new(entry.clone());
             result.push(TreeDisplayEntry {
-                entry: entry.clone(),
+                entry: rc.clone(),
                 connector,
                 icon: icon.to_string(),
                 display_name,
@@ -320,10 +384,9 @@ impl FileTree {
             if entry.expanded && !entry.children.is_empty() {
                 let mut child_ancestry = ancestry.clone();
                 child_ancestry.push(!is_last);
-                result.extend(self.build_display(&entry.children, child_ancestry));
+                Self::build_display(&rc.children, child_ancestry, result);
             }
         }
-        result
     }
 
     pub fn file_icon(name: &str) -> &'static str {
@@ -359,17 +422,58 @@ impl FileTree {
     }
 }
 
-fn build_gitignore_matcher(root: &Path) -> Option<Gitignore> {
-    let mut builder = GitignoreBuilder::new(root);
-    let gitignore_path = root.join(".gitignore");
-    if gitignore_path.exists() {
-        let _ = builder.add(gitignore_path);
+fn build_gitignore_matchers_for(path: &Path) -> Vec<Gitignore> {
+    let mut matchers: Vec<Gitignore> = Vec::new();
+    let mut current = Some(path.to_path_buf());
+    while let Some(p) = current {
+        let gi = p.join(".gitignore");
+        if gi.exists() {
+            let mut builder = GitignoreBuilder::new(&p);
+            let _ = builder.add(&gi);
+            if let Ok(m) = builder.build() {
+                matchers.push(m);
+            }
+        }
+        current = p.parent().map(|x| x.to_path_buf());
     }
-    let global_gitignore = dirs::home_dir().map(|h| h.join(".config").join("git").join("ignore"));
-    if let Some(global_path) = global_gitignore {
+    if let Some(home) = dirs::home_dir() {
+        let global_path = home.join(".config").join("git").join("ignore");
         if global_path.exists() {
-            let _ = builder.add(global_path);
+            let mut builder = GitignoreBuilder::new(&home);
+            let _ = builder.add(&global_path);
+            if let Ok(m) = builder.build() {
+                matchers.push(m);
+            }
         }
     }
-    builder.build().ok()
+    matchers
+}
+
+fn is_hidden_entry(entry: &std::fs::DirEntry) -> bool {
+    let name_os = entry.file_name();
+    let lossy = name_os.to_string_lossy();
+    if lossy.starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        if let Ok(md) = entry.metadata() {
+            if md.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn paths_eq(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
 }

@@ -22,17 +22,23 @@ impl HoverHandler {
                     .join("\n\n")
             }
             HoverContents::Markup(markup) => {
-                markup.value.clone()
+                strip_controls(&markup.value)
             }
         }
     }
 
     fn format_marked_string(marked: &MarkedString) -> String {
         match marked {
-            MarkedString::String(s) => s.clone(),
+            MarkedString::String(s) => strip_controls(s),
             MarkedString::LanguageString(ls) => {
-                format!("```{}\n{}\n```", ls.language, ls.value)
+                format!("```{}\n{}\n```", ls.language, strip_controls(&ls.value))
             }
         }
     }
+}
+
+fn strip_controls(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t' || *c == '\r')
+        .collect()
 }

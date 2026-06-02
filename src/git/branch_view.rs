@@ -8,17 +8,18 @@ pub struct GraphLine {
     pub is_head: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BranchViewPanel {
     pub visible: bool,
     pub data: Vec<GraphLine>,
     pub selected: usize,
     pub repo_path: Option<PathBuf>,
+    pub error: Option<String>,
 }
 
 impl BranchViewPanel {
     pub fn new() -> Self {
-        Self { visible: false, data: Vec::new(), selected: 0, repo_path: None }
+        Self::default()
     }
 
     pub fn toggle(&mut self) {
@@ -31,10 +32,14 @@ impl BranchViewPanel {
     pub fn refresh(&mut self, repo_path: PathBuf) {
         self.repo_path = Some(repo_path.clone());
         self.data.clear();
+        self.error = None;
 
         let repo = match git2::Repository::open(&repo_path) {
             Ok(r) => r,
-            Err(_) => return,
+            Err(e) => {
+                self.error = Some(format!("Failed to open repository: {}", e));
+                return;
+            }
         };
 
         let renderer = GraphRenderer::new(&repo);

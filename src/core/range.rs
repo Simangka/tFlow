@@ -1,6 +1,6 @@
 use crate::core::Position;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Range {
     pub start: Position,
     pub end: Position,
@@ -39,10 +39,6 @@ impl Range {
     }
 
     pub fn lines(&self) -> usize {
-        if self.end.line >= self.start.line {
-            self.end.line - self.start.line + 1
-        } else {
-            0
-        }
+        self.start.line.abs_diff(self.end.line) + 1
     }
 }

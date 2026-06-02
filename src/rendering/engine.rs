@@ -13,11 +13,14 @@ use crate::editor::selection::Selection;
 use crate::theme::Theme;
 use crate::theme::syntax::SyntaxHighlighter;
 use ratatui::style::Modifier;
+use std::collections::{HashMap, HashSet};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone)]
 pub struct RenderEngine {
-    pub use_dirty_regions: bool,
+    pub _use_dirty_regions: bool,
     pub dirty_regions: Vec<Rect>,
+    pub dirty_lines: HashSet<usize>,
     pub prev_viewport: Option<ViewportState>,
     pub scroll_offset: Position,
     pub viewport_height: usize,
@@ -34,8 +37,9 @@ pub struct ViewportState {
 impl RenderEngine {
     pub fn new() -> Self {
         Self {
-            use_dirty_regions: true,
+            _use_dirty_regions: true,
             dirty_regions: Vec::new(),
+            dirty_lines: HashSet::new(),
             prev_viewport: None,
             scroll_offset: Position::zero(),
             viewport_height: 0,
@@ -47,8 +51,13 @@ impl RenderEngine {
         self.dirty_regions.push(*area);
     }
 
+    pub fn mark_line_dirty(&mut self, line: usize) {
+        self.dirty_lines.insert(line);
+    }
+
     pub fn clear_dirty(&mut self) {
         self.dirty_regions.clear();
+        self.dirty_lines.clear();
     }
 
     pub fn render_buffer(
@@ -120,12 +129,7 @@ impl RenderEngine {
                     blame_width,
                     area.height,
                 );
-                let visible_blame: Vec<Option<crate::git::BlameInfo>> = bd.iter()
-                    .skip(visible_start)
-                    .take(area.height as usize)
-                    .cloned()
-                    .collect();
-                crate::rendering::blame_gutter::render(frame, blame_area, &visible_blame, visible_start, theme);
+                crate::rendering::blame_gutter::render(frame, blame_area, bd, visible_start, theme);
             }
         }
 
@@ -133,12 +137,12 @@ impl RenderEngine {
         let mut text_lines: Vec<TextLine<'static>> = Vec::with_capacity(visible_range.len());
 
         let query_len = search_state.query.len();
-        let mut matches_by_line: Vec<Vec<(usize, usize)>> = vec![Vec::new(); total_lines];
+        let mut matches_by_line: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
         if !search_state.query.is_empty() {
             for m in &search_state.matches {
                 let end = m.column + query_len;
                 if m.line < total_lines {
-                    matches_by_line[m.line].push((m.column, end));
+                    matches_by_line.entry(m.line).or_default().push((m.column, end));
                 }
             }
         }
@@ -158,35 +162,40 @@ impl RenderEngine {
 
             if let Some(ref sr) = sel_range {
                 if !sr.is_empty() && line_idx >= sr.start.line && line_idx <= sr.end.line {
+                    let line_char_count = line_text.chars().count();
                     let sel_start_col = if line_idx == sr.start.line { sr.start.column } else { 0 };
-                    let sel_end_col = if line_idx == sr.end.line { sr.end.column } else { line_text.len() };
+                    let sel_end_col = if line_idx == sr.end.line { sr.end.column } else { line_char_count };
 
-                    let sel_start_clamped = sel_start_col.min(line_text.len());
-                    let sel_end_clamped = sel_end_col.min(line_text.len());
+                    let sel_start_clamped = sel_start_col.min(line_char_count);
+                    let sel_end_clamped = sel_end_col.min(line_char_count);
 
                     if sel_start_clamped > 0 {
-                        let before = &line_text[..sel_start_clamped];
+                        let (byte_end, _) = char_range_to_byte_range(&line_text, 0, sel_start_clamped);
+                        let before = &line_text[..byte_end];
                         if !before.is_empty() {
                             spans.push(Span::styled(before.to_string(), Style::default().fg(theme.fg)));
                         }
                     }
 
                     if sel_end_clamped > sel_start_clamped {
-                        let selected = &line_text[sel_start_clamped..sel_end_clamped];
+                        let (byte_start, byte_end) = char_range_to_byte_range(&line_text, sel_start_clamped, sel_end_clamped);
+                        let selected = &line_text[byte_start..byte_end];
                         if !selected.is_empty() {
                             spans.push(Span::styled(selected.to_string(), theme.selection_style()));
                         }
                     }
 
-                    if sel_end_clamped < line_text.len() {
-                        let after = &line_text[sel_end_clamped..];
+                    if sel_end_clamped < line_char_count {
+                        let (_, byte_start) = char_range_to_byte_range(&line_text, 0, sel_end_clamped);
+                        let after = &line_text[byte_start..];
                         if !after.is_empty() {
                             spans.push(Span::styled(after.to_string(), Style::default().fg(theme.fg)));
                         }
                     }
 
                     if spans.is_empty() {
-                        let display = &line_text[col_offset.min(line_text.len())..];
+                        let byte_col_offset = char_to_byte_index(&line_text, col_offset.min(line_char_count));
+                        let display = &line_text[byte_col_offset..];
                         spans.push(Span::styled(display.to_string(), Style::default().fg(theme.fg)));
                     }
 
@@ -204,17 +213,21 @@ impl RenderEngine {
                 line_style = line_style.bg(bg);
             }
 
-            let matches_on_line = if query_len > 0 && line_idx < matches_by_line.len() {
-                matches_by_line[line_idx].clone()
+            let matches_on_line = if query_len > 0 {
+                matches_by_line.get(&line_idx).cloned().unwrap_or_default()
             } else {
                 Vec::new()
             };
+
+            let display_map = char_to_display_widths(&line_text);
+            let matches_on_line_display = convert_matches_to_display(&matches_on_line, &display_map);
 
             let current_match_on_line = if let Some(cmi) = search_state.current_match {
                 if cmi < search_state.matches.len() {
                     let mp = &search_state.matches[cmi];
                     if mp.line == line_idx {
-                        matches_on_line.iter().position(|&(s, _)| s == mp.column)
+                        let mp_display_start = *display_map.get(mp.column).unwrap_or_else(|| display_map.last().unwrap_or(&0));
+                        matches_on_line_display.iter().position(|&(s, _)| s == mp_display_start)
                     } else {
                         None
                     }
@@ -262,21 +275,21 @@ impl RenderEngine {
                 }
                 if adjusted.is_empty() {
                     text_lines.push(TextLine::from(vec![Span::styled(" ", line_style)]));
-                } else if matches_on_line.is_empty() {
+                } else if matches_on_line_display.is_empty() {
                     let spans: Vec<Span> = adjusted.into_iter().map(|(t, s)| {
                         Span::styled(t, s)
                     }).collect();
                     text_lines.push(TextLine::from(spans).style(line_style));
                 } else {
                     let mut char_spans: Vec<(String, Style)> = Vec::new();
-                    let mut abs_col = col_offset;
+                    let mut abs_col = *display_map.get(col_offset).unwrap_or_else(|| display_map.last().unwrap_or(&0));
                     for (seg_text, seg_style) in &adjusted {
                         let seg_fg = seg_style.fg.unwrap_or(theme.fg);
                         let seg_bg = seg_style.bg.unwrap_or(theme.bg);
                         for ch in seg_text.chars() {
-                            let is_match = matches_on_line.iter().any(|&(s, e)| abs_col >= s && abs_col < e);
+                            let is_match = matches_on_line_display.iter().any(|&(s, e)| abs_col >= s && abs_col < e);
                             let is_current = if let Some(ci) = current_match_on_line {
-                                ci < matches_on_line.len() && is_match && abs_col >= matches_on_line[ci].0 && abs_col < matches_on_line[ci].1
+                                ci < matches_on_line_display.len() && is_match && abs_col >= matches_on_line_display[ci].0 && abs_col < matches_on_line_display[ci].1
                             } else {
                                 false
                             };
@@ -296,12 +309,12 @@ impl RenderEngine {
                             if let Some(last) = char_spans.last_mut() {
                                 if last.1 == chr_style {
                                     last.0.push(ch);
-                                    abs_col += 1;
+                                    abs_col += display_width(ch);
                                     continue;
                                 }
                             }
                             char_spans.push((ch.to_string(), chr_style));
-                            abs_col += 1;
+                            abs_col += display_width(ch);
                         }
                     }
                     if char_spans.is_empty() {
@@ -394,14 +407,16 @@ impl RenderEngine {
         let sel_range = selection.normalized_range();
         if let Some(ref sr) = sel_range {
             if !sr.is_empty() && line_idx >= sr.start.line && line_idx <= sr.end.line {
+                let line_char_count = line.chars().count();
                 let sel_start_col = if line_idx == sr.start.line { sr.start.column } else { 0 };
-                let sel_end_col = if line_idx == sr.end.line { sr.end.column } else { line.len() };
+                let sel_end_col = if line_idx == sr.end.line { sr.end.column } else { line_char_count };
 
-                let sel_start = sel_start_col.min(line.len());
-                let sel_end = sel_end_col.min(line.len());
+                let sel_start = sel_start_col.min(line_char_count);
+                let sel_end = sel_end_col.min(line_char_count);
 
                 if col_offset < sel_start {
-                    let before = &line[col_offset..sel_start];
+                    let (byte_start, byte_end) = char_range_to_byte_range(line, col_offset, sel_start);
+                    let before = &line[byte_start..byte_end];
                     if !before.is_empty() {
                         spans.push(Span::styled(before.to_string(), line_style));
                     }
@@ -409,29 +424,34 @@ impl RenderEngine {
 
                 let sel_effective_start = if col_offset > sel_start { col_offset } else { sel_start };
                 if sel_effective_start < sel_end {
-                    let selected = &line[sel_effective_start..sel_end];
+                    let (byte_start, byte_end) = char_range_to_byte_range(line, sel_effective_start, sel_end);
+                    let selected = &line[byte_start..byte_end];
                     if !selected.is_empty() {
                         spans.push(Span::styled(selected.to_string(), theme.selection_style()));
                     }
                 }
 
-                if sel_end < line.len() {
-                    let after = &line[sel_end..];
+                if sel_end < line_char_count {
+                    let (_, byte_start) = char_range_to_byte_range(line, 0, sel_end);
+                    let after = &line[byte_start..];
                     if !after.is_empty() {
                         spans.push(Span::styled(after.to_string(), line_style));
                     }
                 }
 
                 if spans.is_empty() {
-                    let text = &line[col_offset.min(line.len())..];
+                    let byte_col_offset = char_to_byte_index(line, col_offset.min(line_char_count));
+                    let text = &line[byte_col_offset..];
                     spans.push(Span::styled(text.to_string(), line_style));
                 }
             } else {
-                let text = &line[col_offset.min(line.len())..];
+                let byte_col_offset = char_to_byte_index(line, col_offset.min(line.chars().count()));
+                let text = &line[byte_col_offset..];
                 spans.push(Span::styled(text.to_string(), line_style));
             }
         } else {
-            let text = &line[col_offset.min(line.len())..];
+            let byte_col_offset = char_to_byte_index(line, col_offset.min(line.chars().count()));
+            let text = &line[byte_col_offset..];
             spans.push(Span::styled(text.to_string(), line_style));
         }
 
@@ -479,14 +499,17 @@ impl RenderEngine {
         current_match_style: Style,
     ) -> Vec<Span<'static>> {
         if matches_on_line.is_empty() {
-            let text = if col_offset < line_text.len() {
-                line_text[col_offset..].to_string()
+            let line_char_count = line_text.chars().count();
+            let byte_col_offset = char_to_byte_index(line_text, col_offset.min(line_char_count));
+            let text = if byte_col_offset < line_text.len() {
+                line_text[byte_col_offset..].to_string()
             } else {
                 String::new()
             };
             return vec![Span::styled(text, default_style)];
         }
 
+        let line_char_count = line_text.chars().count();
         let mut segments: Vec<(usize, usize)> = Vec::new();
         let mut prev_end = 0usize;
         for &(ms, me) in matches_on_line {
@@ -496,8 +519,8 @@ impl RenderEngine {
             segments.push((ms, me));
             prev_end = me;
         }
-        if prev_end < line_text.len() {
-            segments.push((prev_end, line_text.len()));
+        if prev_end < line_char_count {
+            segments.push((prev_end, line_char_count));
         }
 
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -509,7 +532,8 @@ impl RenderEngine {
             if text_start >= seg_end {
                 continue;
             }
-            let text = &line_text[text_start..seg_end];
+            let (byte_start, byte_end) = char_range_to_byte_range(line_text, text_start, seg_end);
+            let text = &line_text[byte_start..byte_end];
             let is_match = matches_on_line.iter().any(|&(ms, me)| ms == seg_start && me == seg_end);
             let is_current = if let Some(ci) = current_match_on_line {
                 is_match && seg_start == matches_on_line[ci].0 && seg_end == matches_on_line[ci].1
@@ -552,4 +576,46 @@ impl RenderEngine {
         let clamped_line = new_line.min(max_scroll);
         self.scroll_offset.line = clamped_line;
     }
+}
+
+fn display_width(c: char) -> usize {
+    UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+fn char_range_to_byte_range(s: &str, char_start: usize, char_end: usize) -> (usize, usize) {
+    let mut byte_start = s.len();
+    let mut byte_end = s.len();
+    for (i, (b, _)) in s.char_indices().enumerate() {
+        if i == char_start { byte_start = b; }
+        if i == char_end { byte_end = b; }
+    }
+    if char_end > s.chars().count() { byte_end = s.len(); }
+    (byte_start.min(byte_end), byte_end.max(byte_start))
+}
+
+fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
+    char_range_to_byte_range(s, char_idx, char_idx).0
+}
+
+fn char_to_display_widths(line: &str) -> Vec<usize> {
+    let mut map = Vec::with_capacity(line.chars().count() + 1);
+    map.push(0);
+    let mut col = 0;
+    for ch in line.chars() {
+        col += display_width(ch);
+        map.push(col);
+    }
+    map
+}
+
+fn convert_matches_to_display(matches: &[(usize, usize)], map: &[usize]) -> Vec<(usize, usize)> {
+    let last = map.last().copied().unwrap_or(0);
+    matches
+        .iter()
+        .map(|&(s, e)| {
+            let ds = *map.get(s).unwrap_or(&last);
+            let de = *map.get(e).unwrap_or(&last);
+            (ds, de)
+        })
+        .collect()
 }

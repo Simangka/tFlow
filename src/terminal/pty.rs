@@ -1,15 +1,28 @@
 use portable_pty::{PtySize, CommandBuilder, Child, MasterPty, SlavePty};
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
 use tokio::sync::mpsc;
 use parking_lot::Mutex;
+
+const ALLOWED_SHELLS: &[&str] = &[
+    "/bin/sh", "/bin/bash", "/usr/bin/bash", "/usr/bin/zsh", "/bin/zsh",
+    "/usr/bin/fish", "/bin/fish",
+    "cmd.exe", "cmd", "powershell.exe", "powershell", "pwsh.exe", "pwsh",
+];
+
+const PTY_CHANNEL_CAPACITY: usize = 1024;
 
 pub struct TerminalProcess {
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     _slave: Option<Box<dyn SlavePty + Send>>,
     child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
+    stop_flag: Arc<AtomicBool>,
+    reader_handle: Option<JoinHandle<()>>,
+    dropped_bytes: Arc<AtomicU64>,
 }
 
 impl TerminalProcess {
@@ -20,11 +33,26 @@ impl TerminalProcess {
     ) -> Result<
         (
             Self,
-            mpsc::UnboundedReceiver<Vec<u8>>,
-            mpsc::UnboundedReceiver<()>,
+            mpsc::Receiver<Vec<u8>>,
+            mpsc::Receiver<()>,
         ),
         String,
     > {
+        let shell_name = std::path::Path::new(shell)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(shell);
+        let allowed = ALLOWED_SHELLS.iter().any(|&a| {
+            let an = std::path::Path::new(a)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(a);
+            an.eq_ignore_ascii_case(shell_name) || a == shell
+        });
+        if !allowed {
+            return Err(format!("shell '{}' not in allow-list", shell));
+        }
+
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| format!("PTY: {}", e))?;
@@ -45,12 +73,16 @@ impl TerminalProcess {
 
         let master = Arc::new(Mutex::new(pair.master));
         let child = Arc::new(Mutex::new(Some(child)));
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (redraw_tx, redraw_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(PTY_CHANNEL_CAPACITY);
+        let (redraw_tx, redraw_rx) = mpsc::channel(PTY_CHANNEL_CAPACITY);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let dropped_bytes = Arc::new(AtomicU64::new(0));
 
         let master_clone = master.clone();
         let redraw_tx_clone = redraw_tx.clone();
-        std::thread::spawn(move || {
+        let stop_flag_clone = stop_flag.clone();
+        let dropped_bytes_clone = dropped_bytes.clone();
+        let reader_handle = std::thread::spawn(move || {
             let mut r = match master_clone.lock().try_clone_reader() {
                 Ok(r) => r,
                 Err(e) => {
@@ -63,6 +95,9 @@ impl TerminalProcess {
             let mut zero_start: Option<Instant> = None;
             let mut pipe_was_broken = false;
             loop {
+                if stop_flag_clone.load(Ordering::SeqCst) {
+                    break;
+                }
                 match r.read(&mut buf) {
                     Ok(0) => {
                         // ConPTY pipe broken (child process exited).
@@ -105,15 +140,21 @@ impl TerminalProcess {
                                 // child TUI process (opencode, vim, less, etc.) just exited.
                                 // Signal the panel to force-exit the alternate screen buffer
                                 // so the shell prompt becomes visible immediately.
-                                let _ = redraw_tx_clone.send(());
+                                let _ = redraw_tx_clone.try_send(());
                             }
                             pipe_was_broken = false;
                         }
                         zero_count = 0;
                         zero_start = None;
                         let data = buf[..n].to_vec();
-                        if tx.send(data).is_err() {
-                            break;
+                        match tx.try_send(data) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                dropped_bytes_clone.fetch_add(n as u64, Ordering::Relaxed);
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                break;
+                            }
                         }
                     }
                     Err(_) => {
@@ -128,6 +169,9 @@ impl TerminalProcess {
             master,
             _slave: Some(pair.slave),
             child,
+            stop_flag,
+            reader_handle: Some(reader_handle),
+            dropped_bytes,
         }, rx, redraw_rx))
     }
 
@@ -145,13 +189,25 @@ impl TerminalProcess {
         *self.child.lock() = None;
         self._slave = None;
     }
+
+    pub fn dropped_bytes(&self) -> u64 {
+        self.dropped_bytes.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for TerminalProcess {
     fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
         if let Some(ref mut child) = *self.child.lock() {
             let _ = child.kill();
-            let _ = child.wait();
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(500) {
+                if let Ok(Some(_)) = child.try_wait() { break; }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        if let Some(handle) = self.reader_handle.take() {
+            let _ = handle.join();
         }
     }
 }

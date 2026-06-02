@@ -1,4 +1,5 @@
 use crate::core::Position;
+use crate::core::buffer::Buffer;
 
 #[derive(Debug, Clone)]
 pub struct Cursor {
@@ -74,6 +75,57 @@ impl Cursor {
     }
 
     pub fn toggle_blink(&mut self) {
-        self.blink_state = true;
+        self.blink_state = !self.blink_state;
+    }
+
+    pub fn move_left_in(&mut self, buf: &Buffer) -> Position {
+        if self.position.column > 0 {
+            self.position.column -= 1;
+        } else if self.position.line > 0 {
+            self.position.line -= 1;
+            self.position.column = buf.chars_at_line(self.position.line).saturating_sub(1);
+        }
+        self.preferred_column = self.position.column;
+        self.position
+    }
+
+    pub fn move_right_in(&mut self, buf: &Buffer) -> Position {
+        let line_max = buf.chars_at_line(self.position.line).saturating_sub(1);
+        if self.position.column < line_max {
+            self.position.column += 1;
+        } else if self.position.line + 1 < buf.line_count() {
+            self.position.line += 1;
+            self.position.column = 0;
+        }
+        self.preferred_column = self.position.column;
+        self.position
+    }
+
+    pub fn move_up_in(&mut self, buf: &Buffer) -> Position {
+        if self.position.line > 0 {
+            self.position.line -= 1;
+        }
+        let line_max = buf.chars_at_line(self.position.line).saturating_sub(1);
+        self.position.column = self.preferred_column.min(line_max);
+        self.position
+    }
+
+    pub fn move_down_in(&mut self, buf: &Buffer) -> Position {
+        let last = buf.line_count().saturating_sub(1);
+        if self.position.line < last {
+            self.position.line += 1;
+        }
+        let line_max = buf.chars_at_line(self.position.line).saturating_sub(1);
+        self.position.column = self.preferred_column.min(line_max);
+        self.position
+    }
+
+    pub fn set_position_clamped(&mut self, pos: Position, buf: &Buffer) {
+        self.position = buf.clamp_position(pos);
+        self.preferred_column = self.position.column;
+    }
+
+    pub fn previous_word_boundary(&self, _buf: &Buffer) -> Position {
+        self.position
     }
 }

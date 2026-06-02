@@ -54,10 +54,20 @@ fn parse_file_position(s: &str) -> (PathBuf, Option<usize>, Option<usize>) {
     (PathBuf::from(s), None, None)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    let cli = Cli::parse();
+fn install_panic_hook() {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+        prev_hook(info);
+    }));
+}
 
+fn init_logging(cli: &Cli) -> Result<(), anyhow::Error> {
     if cli.verbose || std::env::var("TFLOW_LOG").is_ok() {
         let log_file = cli.log_file.clone().unwrap_or_else(|| {
             let mut p = std::env::temp_dir();
@@ -74,6 +84,25 @@ async fn main() -> Result<(), anyhow::Error> {
 
         tracing::subscriber::set_global_default(subscriber)?;
         tracing::info!("tflow started with log file: {:?}", log_file);
+    } else {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("tflow=info,warn"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let cli = Cli::parse();
+
+    install_panic_hook();
+
+    if let Err(e) = init_logging(&cli) {
+        eprintln!("logging init failed: {}", e);
     }
 
     let mut config = tflow::config::Config::load();

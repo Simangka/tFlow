@@ -114,7 +114,7 @@ impl MarkdownRenderLine {
 
     fn section(title: &str, style: Style) -> Self {
         let width: usize = 38;
-        let side = width.saturating_sub(title.len()) / 2;
+        let side = width.saturating_sub(title.chars().count()) / 2;
         let bar = "\u{2500}".repeat(side);
         let line = format!("{}{}{}", bar, title, bar);
         MarkdownRenderLine {

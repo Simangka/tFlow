@@ -28,6 +28,8 @@ pub enum TaskResult {
     FileIndexResult { root: PathBuf, entries: Vec<crate::workspace::FileEntry> },
     CrashRecoveryResult(Option<Vec<RecoveryFile>>),
     LintResult(Vec<crate::core::types::Notification>),
+    Unimplemented { id: TaskId },
+    Error { id: TaskId, message: String },
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 use std::path::Path;
 use crate::core::{Position, Range, EditMode, Notification, BufferInfo, SearchState, Movement, SearchDirection};
-use crate::core::buffer::Buffer;
+use crate::core::buffer::{Buffer, LineEnding};
 use crate::editor::cursor::Cursor;
 use crate::editor::selection::Selection;
 use crate::editor::modes::EditorMode;
@@ -67,7 +67,12 @@ pub struct AppContext {
     pub last_keypress: std::time::Instant,
     pub completion_pending: bool,
     pub lsp_enabled: bool,
+    pub show_quit_confirmation: bool,
+    pub last_render: Option<std::time::Instant>,
+    pub last_saved_at: Option<std::time::Instant>,
 }
+
+pub const MAX_OPEN_BUFFERS: usize = 256;
 
 impl AppContext {
     pub fn new(config: Config) -> Self {
@@ -160,6 +165,9 @@ impl AppContext {
             last_keypress: std::time::Instant::now(),
             completion_pending: false,
             lsp_enabled: true,
+            show_quit_confirmation: false,
+            last_render: None,
+            last_saved_at: None,
         }
     }
 
@@ -172,6 +180,11 @@ impl AppContext {
     }
 
     pub fn push_notification(&mut self, notification: Notification) {
+        if let Some(last) = self.notifications.last() {
+            if last.message == notification.message && last.level == notification.level {
+                return;
+            }
+        }
         self.notifications.push(notification);
         if self.notifications.len() > 10 {
             self.notifications.remove(0);
@@ -207,21 +220,28 @@ impl AppContext {
         }
     }
 
-    pub fn open_file(&mut self, path: std::path::PathBuf) -> Result<usize, anyhow::Error> {
+    pub async fn open_file_async(&mut self, path: std::path::PathBuf) -> anyhow::Result<usize> {
+        if self.buffers.len() >= MAX_OPEN_BUFFERS {
+            anyhow::bail!("max open buffers reached ({})", MAX_OPEN_BUFFERS);
+        }
         let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
         let existing = {
             let mut result = None;
             for (i, buf) in self.buffers.iter().enumerate() {
                 if let Some(ref bp) = buf.path {
                     if *bp == canonical || *bp == path {
-                        result = Some((i, buf.cursor, buf.mode));
+                        result = Some(i);
                         break;
                     }
                 }
             }
             result
         };
-        if let Some((i, cursor_pos, mode)) = existing {
+        if let Some(i) = existing {
+            let (cursor_pos, mode) = {
+                let buf = &self.buffers[i];
+                (buf.cursor, buf.mode)
+            };
             self.sync_to_pane();
             self.active_buffer = i;
             if let Some(pane) = self.split_manager.active_pane() {
@@ -235,7 +255,11 @@ impl AppContext {
         }
 
         let id = self.buffers.len();
-        let buffer = Buffer::from_path(id, path.clone())?;
+        let path_clone = path.clone();
+        let buffer = tokio::task::spawn_blocking(move || Buffer::from_path(id, path_clone))
+            .await
+            .map_err(|e| anyhow::anyhow!("blocking load failed: {}", e))??;
+
         self.buffers.push(buffer);
         self.histories.push(History::new(100));
         self.sync_to_pane();
@@ -248,6 +272,63 @@ impl AppContext {
         self.editor_mode.mode = EditMode::Normal;
         self.selection.clear();
         Ok(id)
+    }
+
+    pub fn open_file(&mut self, path: std::path::PathBuf) -> anyhow::Result<usize> {
+        futures::executor::block_on(self.open_file_async(path))
+    }
+
+    pub async fn save_file_async(&mut self) -> anyhow::Result<()> {
+        if self.active_buffer >= self.buffers.len() {
+            anyhow::bail!("no active buffer");
+        }
+        if self.buffers[self.active_buffer].path.is_none() {
+            anyhow::bail!("no active file path");
+        }
+        let placeholder = Buffer::new(usize::MAX);
+        let mut buf = std::mem::replace(&mut self.buffers[self.active_buffer], placeholder);
+        let join_result = tokio::task::spawn_blocking(move || {
+            let r = buf.save();
+            (buf, r)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("blocking save failed: {}", e))?;
+        let (buf, save_result) = join_result;
+        self.buffers[self.active_buffer] = buf;
+        save_result?;
+        self.last_saved_at = Some(std::time::Instant::now());
+        Ok(())
+    }
+
+    pub fn save_file(&mut self) -> anyhow::Result<()> {
+        futures::executor::block_on(self.save_file_async())
+    }
+
+    pub fn paste(&mut self, text: String) -> anyhow::Result<()> {
+        if self.active_buffer >= self.buffers.len() {
+            anyhow::bail!("no active buffer");
+        }
+        let pos = self.cursor.position;
+        let new_pos = Position::new(pos.line, pos.column + text.chars().count());
+        {
+            let buf = self.buffers.get_mut(self.active_buffer)
+                .ok_or_else(|| anyhow::anyhow!("no active buffer"))?;
+            buf.insert_str(pos, &text);
+        }
+        self.cursor.position = new_pos;
+        self.cursor.preferred_column = new_pos.column;
+        if let Some(history) = self.histories.get_mut(self.active_buffer) {
+            history.push(HistoryEntry {
+                changes: vec![ChangeKind::Insert { pos, text: text.clone() }],
+                timestamp: std::time::Instant::now(),
+                cursor_before: pos,
+                cursor_after: new_pos,
+            });
+        }
+        if let Some(buf) = self.buffers.get_mut(self.active_buffer) {
+            buf.set_modified();
+        }
+        Ok(())
     }
 
     pub fn close_current_buffer(&mut self) -> bool {
@@ -878,7 +959,7 @@ impl AppContext {
             Action::Quit => {
                 let has_dirty = self.buffers.iter().any(|b| b.dirty);
                 if has_dirty && !self.force_quit {
-                    self.push_error("Unsaved changes. Use :q! or force quit to exit");
+                    self.show_quit_confirmation = true;
                 } else {
                     self.quit_requested = true;
                 }
@@ -1173,7 +1254,7 @@ impl AppContext {
                         } else {
                             let has_dirty = self.buffers.iter().any(|b| b.dirty);
                             if has_dirty && !self.force_quit {
-                                self.push_error("Unsaved changes. Use 'q!' or force quit");
+                                self.show_quit_confirmation = true;
                             } else {
                                 self.quit_requested = true;
                             }

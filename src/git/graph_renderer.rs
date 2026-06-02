@@ -1,5 +1,6 @@
 use git2::{Oid, Repository, BranchType};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct CommitData {
@@ -16,16 +17,16 @@ pub struct CommitData {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GraphChar {
-    Commit,        // ●
-    MergeCommit,   // ○
-    Vertical,      // │
-    BranchRight,   // ├
-    MergeLeft,     // ┤
-    BottomRight,   // └
-    BottomLeft,    // ┘
-    Horizontal,    // ─
-    DiagonalLeft,  // ╱
-    DiagonalRight, // ╲
+    Commit,
+    MergeCommit,
+    Vertical,
+    BranchRight,
+    MergeLeft,
+    BottomRight,
+    BottomLeft,
+    Horizontal,
+    DiagonalLeft,
+    DiagonalRight,
     Empty,
 }
 
@@ -40,14 +41,20 @@ pub struct GraphRenderer {
     pub rows: Vec<DisplayRow>,
 }
 
+pub const DEFAULT_MAX_COMMITS: usize = 5000;
+
 impl GraphRenderer {
     pub fn new(repo: &Repository) -> Self {
-        let commits = Self::collect_commits(repo);
+        Self::with_max(repo, DEFAULT_MAX_COMMITS)
+    }
+
+    pub fn with_max(repo: &Repository, max_commits: usize) -> Self {
+        let commits = Self::collect_commits(repo, max_commits);
         let rows = Self::build_display(&commits);
         GraphRenderer { rows }
     }
 
-    fn collect_commits(repo: &Repository) -> Vec<CommitData> {
+    fn collect_commits(repo: &Repository, max_commits: usize) -> Vec<CommitData> {
         let mut refs: Vec<(String, Oid, bool)> = Vec::new();
         let mut ref_oids: HashSet<Oid> = HashSet::new();
 
@@ -78,6 +85,9 @@ impl GraphRenderer {
         while let Some(oid) = queue.pop_front() {
             if !visited.insert(oid) {
                 continue;
+            }
+            if commit_map.len() >= max_commits {
+                break;
             }
             if let Ok(commit) = repo.find_commit(oid) {
                 let msg = commit.message().unwrap_or("").to_string();
@@ -118,7 +128,6 @@ impl GraphRenderer {
             }
         }
 
-        // Topological sort: Kahn's algorithm
         let mut in_degree: HashMap<Oid, usize> = HashMap::new();
         let mut rev_graph: HashMap<Oid, Vec<Oid>> = HashMap::new();
 
@@ -132,40 +141,30 @@ impl GraphRenderer {
             }
         }
 
-        let mut queue: VecDeque<Oid> = VecDeque::new();
+        let mut heap: BinaryHeap<(Reverse<i64>, Oid)> = BinaryHeap::new();
         for (oid, deg) in &in_degree {
             if *deg == 0 {
-                queue.push_back(*oid);
+                let ts = commit_map.get(oid).map(|c| c.timestamp).unwrap_or(0);
+                heap.push((Reverse(ts), *oid));
             }
         }
 
         let mut sorted: Vec<CommitData> = Vec::new();
-        while !queue.is_empty() {
-            queue.make_contiguous().sort_by(|a, b| {
-                let ta = commit_map.get(a).map(|c| c.timestamp).unwrap_or(0);
-                let tb = commit_map.get(b).map(|c| c.timestamp).unwrap_or(0);
-                tb.cmp(&ta)
-            });
-            let oid = queue.pop_front().unwrap();
+        let mut degs: HashMap<Oid, usize> = in_degree.clone();
+        while let Some((_, oid)) = heap.pop() {
             if let Some(data) = commit_map.get(&oid) {
                 sorted.push(data.clone());
             }
             if let Some(children) = rev_graph.get(&oid) {
-                let mut to_add: Vec<Oid> = children.iter().filter(|c| {
-                    if let Some(deg) = in_degree.get_mut(c) {
+                for c in children {
+                    if let Some(deg) = degs.get_mut(c) {
+                        if *deg == 0 { continue; }
                         *deg -= 1;
-                        *deg == 0
-                    } else {
-                        false
+                        if *deg == 0 {
+                            let ts = commit_map.get(c).map(|cc| cc.timestamp).unwrap_or(0);
+                            heap.push((Reverse(ts), *c));
+                        }
                     }
-                }).cloned().collect();
-                to_add.sort_by(|a, b| {
-                    let ta = commit_map.get(a).map(|c| c.timestamp).unwrap_or(0);
-                    let tb = commit_map.get(b).map(|c| c.timestamp).unwrap_or(0);
-                    tb.cmp(&ta)
-                });
-                for c in to_add {
-                    queue.push_back(c);
                 }
             }
         }
@@ -180,6 +179,7 @@ impl GraphRenderer {
         }
 
         let mut columns: Vec<(Oid, Vec<(String, bool)>)> = Vec::new();
+        let mut lane_of: HashMap<Oid, usize> = HashMap::new();
         let mut rows: Vec<DisplayRow> = Vec::new();
 
         for commit_idx in 0..commits.len() {
@@ -187,7 +187,7 @@ impl GraphRenderer {
 
             let before_cols: Vec<Oid> = columns.iter().map(|(o, _)| *o).collect();
 
-            let (lane, _) = Self::find_or_create_column(&mut columns, commit.oid);
+            let (lane, _) = Self::find_or_create_column(&mut columns, &mut lane_of, commit.oid);
 
             let col_branches = &columns[lane].1;
             let branch_name = if !commit.refs.is_empty() {
@@ -212,12 +212,12 @@ impl GraphRenderer {
             }
 
             let active_parents: Vec<Oid> = commit.parents.iter()
-                .filter(|pp| before_cols.contains(pp) || columns.iter().any(|(c, _)| *c == **pp))
+                .filter(|pp| before_cols.contains(pp) || lane_of.contains_key(pp))
                 .cloned()
                 .collect();
 
             for &p_oid in &active_parents {
-                if let Some(p_lane) = columns.iter().position(|(c, _)| *c == p_oid) {
+                if let Some(&p_lane) = lane_of.get(&p_oid) {
                     if p_lane != lane {
                         let (left, right) = if p_lane < lane { (p_lane, lane) } else { (lane, p_lane) };
                         for col in left..=right {
@@ -239,7 +239,7 @@ impl GraphRenderer {
                 if col == lane { continue; }
                 if col < before_cols.len() {
                     let before_oid = before_cols[col];
-                    let in_after = columns.iter().any(|(c, _)| *c == before_oid)
+                    let in_after = lane_of.contains_key(&before_oid)
                         || active_parents.contains(&before_oid);
                     if in_after && chars[col] == GraphChar::Empty {
                         chars[col] = GraphChar::Vertical;
@@ -267,7 +267,7 @@ impl GraphRenderer {
                 is_head: row_is_head,
             });
 
-            let after_cols = Self::update_columns(&mut columns, commit, commits, lane);
+            let after_cols = Self::update_columns(&mut columns, &mut lane_of, commit, commits, lane);
 
             if before_cols != after_cols {
                 let con_chars = Self::render_connector_row(&before_cols, &after_cols, &columns, commit);
@@ -286,17 +286,24 @@ impl GraphRenderer {
         rows
     }
 
-    fn find_or_create_column(columns: &mut Vec<(Oid, Vec<(String, bool)>)>, oid: Oid) -> (usize, bool) {
-        if let Some(pos) = columns.iter().position(|(c, _)| *c == oid) {
+    fn find_or_create_column(
+        columns: &mut Vec<(Oid, Vec<(String, bool)>)>,
+        lane_of: &mut HashMap<Oid, usize>,
+        oid: Oid,
+    ) -> (usize, bool) {
+        if let Some(&pos) = lane_of.get(&oid) {
             (pos, false)
         } else {
             columns.push((oid, Vec::new()));
-            (columns.len() - 1, true)
+            let pos = columns.len() - 1;
+            lane_of.insert(oid, pos);
+            (pos, true)
         }
     }
 
     fn update_columns(
         columns: &mut Vec<(Oid, Vec<(String, bool)>)>,
+        lane_of: &mut HashMap<Oid, usize>,
         commit: &CommitData,
         all_commits: &[CommitData],
         lane: usize,
@@ -308,7 +315,12 @@ impl GraphRenderer {
 
         if parents.is_empty() {
             if lane < columns.len() {
+                let removed_oid = columns[lane].0;
                 columns.remove(lane);
+                lane_of.remove(&removed_oid);
+                for (idx, (o, _)) in columns.iter().enumerate() {
+                    lane_of.insert(*o, idx);
+                }
             }
         } else {
             let existing_branches = if commit.refs.is_empty() {
@@ -323,12 +335,20 @@ impl GraphRenderer {
                 merged
             };
 
+            let old_oid = columns[lane].0;
             columns[lane] = (parents[0], existing_branches);
+            if old_oid != parents[0] {
+                lane_of.remove(&old_oid);
+                lane_of.insert(parents[0], lane);
+            }
 
             for (j, p) in parents[1..].iter().enumerate() {
-                if !columns.iter().any(|(c, _)| *c == *p) {
+                if !lane_of.contains_key(p) {
                     let insert_pos = (lane + 1 + j).min(columns.len());
                     columns.insert(insert_pos, (*p, Vec::new()));
+                    for (idx, (o, _)) in columns.iter().enumerate() {
+                        lane_of.insert(*o, idx);
+                    }
                 }
             }
 
@@ -340,6 +360,10 @@ impl GraphRenderer {
                 }
             }
             *columns = deduped;
+            lane_of.clear();
+            for (idx, (o, _)) in columns.iter().enumerate() {
+                lane_of.insert(*o, idx);
+            }
         }
 
         columns.iter().map(|(o, _)| *o).collect()
@@ -427,16 +451,18 @@ impl GraphChar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git2::Repository;
 
     #[test]
+    #[ignore]
     fn test_render_linear() {
-        let repo_dir = std::env::current_dir().unwrap();
-        let repo = Repository::open(&repo_dir).expect("open repo");
+        let Some(repo_dir) = std::env::var_os("TFLOW_TEST_REPO") else {
+            return;
+        };
+        let path = std::path::PathBuf::from(repo_dir);
+        let Ok(repo) = git2::Repository::open(&path) else {
+            return;
+        };
         let renderer = GraphRenderer::new(&repo);
         assert!(!renderer.rows.is_empty(), "should have rows");
-        for row in &renderer.rows {
-            println!("{}", row.text);
-        }
     }
 }

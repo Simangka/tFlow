@@ -36,7 +36,9 @@ impl Selection {
                 Direction::None
             };
         }
-        self.is_active = true;
+        if self.start.is_some() {
+            self.is_active = true;
+        }
     }
 
     pub fn clear(&mut self) {
@@ -75,7 +77,11 @@ impl Selection {
     pub fn select_all(&mut self, start: Position, end: Position) {
         self.start = Some(start);
         self.end = Some(end);
-        self.direction = Direction::Forward;
+        self.direction = match end.cmp(&start) {
+            std::cmp::Ordering::Greater => Direction::Forward,
+            std::cmp::Ordering::Less => Direction::Backward,
+            std::cmp::Ordering::Equal => Direction::None,
+        };
         self.is_active = true;
     }
 

@@ -1,7 +1,12 @@
 use crate::lsp::types::{RequestId, next_request_id};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, AsyncReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+
+const MAX_CONTENT_LENGTH: usize = 64 * 1024 * 1024;
+const MAX_HEADER_LINE: u64 = 8192;
+const MAX_STDERR_LINE: u64 = 8192;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
@@ -161,44 +166,60 @@ impl RpcReader {
         }
     }
 
-    pub async fn read_message(&mut self) -> Result<Option<RpcMessage>, std::io::Error> {
+    pub async fn read_message(&mut self) -> anyhow::Result<Option<RpcMessage>> {
         let content_length = match self.read_headers().await? {
             Some(len) => len,
             None => return Ok(None),
         };
+        if content_length > MAX_CONTENT_LENGTH {
+            return Err(anyhow!(
+                "Content-Length {} exceeds max {}",
+                content_length,
+                MAX_CONTENT_LENGTH
+            ));
+        }
         let mut body = vec![0u8; content_length];
         self.inner.read_exact(&mut body).await?;
-        let raw: RawMessage = match serde_json::from_slice(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Failed to parse JSON-RPC message: {}", e);
-                let text = String::from_utf8_lossy(&body);
-                tracing::debug!(%text, "Raw message body");
-                return Ok(None);
-            }
-        };
+        let raw: RawMessage = serde_json::from_slice(&body).map_err(|e| {
+            let text = String::from_utf8_lossy(&body);
+            tracing::warn!(error = %e, body = %text, "Failed to parse JSON-RPC message");
+            anyhow!("failed to parse JSON-RPC message: {}", e)
+        })?;
         Ok(Some(raw.into_message()))
     }
 
-    async fn read_headers(&mut self) -> Result<Option<usize>, std::io::Error> {
+    async fn read_headers(&mut self) -> anyhow::Result<Option<usize>> {
         let mut content_length = None;
         loop {
             let mut line = String::new();
-            let n = self.inner.read_line(&mut line).await?;
+            let limited = tokio::io::AsyncReadExt::take(&mut self.inner, MAX_HEADER_LINE);
+            let mut limited_reader = BufReader::new(limited);
+            let n = limited_reader.read_line(&mut line).await?;
             if n == 0 {
                 return Ok(None);
+            }
+            if (n as u64) >= MAX_HEADER_LINE && !line.ends_with('\n') {
+                return Err(anyhow!(
+                    "LSP header line exceeds {} bytes",
+                    MAX_HEADER_LINE
+                ));
             }
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 break;
             }
             if let Some(len) = trimmed.strip_prefix("Content-Length: ") {
-                content_length = Some(len.trim().parse::<usize>().map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                })?);
+                content_length = Some(
+                    len.trim()
+                        .parse::<usize>()
+                        .map_err(|e| anyhow!("invalid Content-Length: {}", e))?,
+                );
             }
         }
-        Ok(content_length)
+        match content_length {
+            Some(len) => Ok(Some(len)),
+            None => Err(anyhow!("missing Content-Length header")),
+        }
     }
 }
 
@@ -218,9 +239,10 @@ impl RpcTransport {
 
 pub async fn read_stderr(mut stderr: ChildStderr, language: String) {
     let mut buf = String::new();
-    let mut reader = tokio::io::BufReader::new(&mut stderr);
     loop {
         buf.clear();
+        let limited = tokio::io::AsyncReadExt::take(&mut stderr, MAX_STDERR_LINE);
+        let mut reader = tokio::io::BufReader::new(limited);
         match reader.read_line(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {

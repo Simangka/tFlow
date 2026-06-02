@@ -28,7 +28,7 @@ pub struct LspCache {
     pub diagnostics: DashMap<DocumentId, CachedDiagnostics>,
     pub completions: DashMap<DocumentId, CachedCompletion>,
     pub semantic_tokens: DashMap<DocumentId, CachedSemanticTokens>,
-    next_diag_version: std::sync::atomic::AtomicU64,
+    next_version: std::sync::atomic::AtomicU64,
 }
 
 impl LspCache {
@@ -37,12 +37,12 @@ impl LspCache {
             diagnostics: DashMap::new(),
             completions: DashMap::new(),
             semantic_tokens: DashMap::new(),
-            next_diag_version: std::sync::atomic::AtomicU64::new(1),
+            next_version: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
     pub fn store_diagnostics(&self, doc_id: DocumentId, diags: Vec<Diagnostic>) {
-        let version = self.next_diag_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let version = self.next_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.diagnostics.insert(doc_id, CachedDiagnostics {
             diagnostics: Arc::new(diags),
             version,
@@ -71,7 +71,7 @@ impl LspCache {
     }
 
     pub fn store_semantic_tokens(&self, doc_id: DocumentId, tokens: Vec<SemanticToken>) {
-        let version = self.next_diag_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let version = self.next_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.semantic_tokens.insert(doc_id, CachedSemanticTokens {
             tokens: Arc::new(tokens),
             version,

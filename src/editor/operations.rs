@@ -4,6 +4,13 @@ use crate::editor::cursor::Cursor;
 use crate::editor::selection::Selection;
 use crate::editor::history::ChangeKind;
 
+const INDENT_WIDTH: usize = 4;
+
+fn line_chars_excl_newline(buf: &Buffer, line: usize) -> usize {
+    let total = buf.chars_at_line(line);
+    if total > 0 && buf.get_line(line).ends_with('\n') { total - 1 } else { total }
+}
+
 pub struct EditOperations;
 
 impl EditOperations {
@@ -38,14 +45,20 @@ impl EditOperations {
     pub fn delete_char_forward(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<Option<ChangeKind>, ()> {
         let pos = cursor.position;
         let line_len = buffer.chars_at_line(pos.line);
-        if pos.column < line_len || pos.line + 1 < buffer.line_count() {
-            let (del_pos, c) = if pos.column < line_len {
-                (pos, buffer.char_at(pos).ok_or(())?)
-            } else {
-                let next_pos = Position::new(pos.line + 1, 0);
-                (next_pos, '\n')
-            };
-            buffer.delete_char(del_pos).ok_or(())?;
+        let total_lines = buffer.line_count();
+        if pos.column >= line_len.saturating_sub(1) && pos.line + 1 < total_lines {
+            let del_pos = Position::new(pos.line, line_len.saturating_sub(1));
+            let c = buffer.delete_char(del_pos).ok_or(())?;
+            buffer.set_modified();
+            let range = Range::new(del_pos, Position::new(del_pos.line, del_pos.column + 1));
+            Ok(Some(ChangeKind::Delete {
+                pos: del_pos,
+                text: c.to_string(),
+                range,
+            }))
+        } else if pos.column < line_len {
+            let del_pos = pos;
+            let c = buffer.delete_char(del_pos).ok_or(())?;
             buffer.set_modified();
             let range = Range::new(del_pos, Position::new(del_pos.line, del_pos.column + 1));
             Ok(Some(ChangeKind::Delete {
@@ -121,9 +134,12 @@ impl EditOperations {
 
     pub fn indent_line(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<ChangeKind, ()> {
         let pos = Position::new(cursor.position.line, 0);
-        buffer.insert_str(pos, "    ");
+        let total_lines = buffer.line_count();
+        let use_tabs = (0..total_lines).any(|l| buffer.get_line(l).starts_with('\t'));
+        let (indent_str, indent_width) = if use_tabs { ("\t", 1) } else { ("    ", INDENT_WIDTH) };
+        buffer.insert_str(pos, indent_str);
         if cursor.position.line == pos.line {
-            cursor.position.column += 4;
+            cursor.position.column += indent_width;
             cursor.preferred_column = cursor.position.column;
         }
         buffer.set_modified();
@@ -135,7 +151,11 @@ impl EditOperations {
     pub fn unindent_line(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<ChangeKind, ()> {
         let line = cursor.position.line;
         let line_text = buffer.get_line(line);
-        let to_remove = line_text.chars().take_while(|c| *c == ' ').take(4).count();
+        let to_remove = if line_text.starts_with('\t') {
+            1
+        } else {
+            line_text.chars().take_while(|c| *c == ' ').take(INDENT_WIDTH).count()
+        };
         if to_remove == 0 {
             return Err(());
         }
@@ -172,18 +192,21 @@ impl EditOperations {
         }
         let line_text = buffer.get_line(line);
         let above_text = buffer.get_line(line - 1);
-        let line_range = Range::new(
+        let line_len = buffer.chars_at_line(line);
+        let _ = buffer.delete_range(Range::new(
             Position::new(line, 0),
-            Position::new(line, buffer.chars_at_line(line)),
-        );
-        let above_range = Range::new(
+            Position::new(line, line_len),
+        ));
+        let _total_after_first = buffer.line_count();
+        let above_len = buffer.chars_at_line(line - 1);
+        let _ = buffer.delete_range(Range::new(
             Position::new(line - 1, 0),
-            Position::new(line - 1, buffer.chars_at_line(line - 1)),
-        );
-        let _ = buffer.delete_range(line_range);
-        let _ = buffer.delete_range(above_range);
+            Position::new(line - 1, above_len),
+        ));
+        let _total_after_second = buffer.line_count();
         let insert_above = Position::new(line - 1, 0);
         buffer.insert_str(insert_above, &format!("{}\n", line_text));
+        let _total_after_first_insert = buffer.line_count();
         let insert_below = Position::new(line, 0);
         buffer.insert_str(insert_below, &format!("{}\n", above_text));
         buffer.set_modified();
@@ -198,18 +221,21 @@ impl EditOperations {
         }
         let line_text = buffer.get_line(line);
         let below_text = buffer.get_line(line + 1);
-        let line_range = Range::new(
+        let line_len = buffer.chars_at_line(line);
+        let _ = buffer.delete_range(Range::new(
             Position::new(line, 0),
-            Position::new(line, buffer.chars_at_line(line)),
-        );
-        let below_range = Range::new(
-            Position::new(line + 1, 0),
-            Position::new(line + 1, buffer.chars_at_line(line + 1)),
-        );
-        let _ = buffer.delete_range(line_range);
-        let _ = buffer.delete_range(below_range);
-        let insert_pos = Position::new(line + 1, 0);
-        buffer.insert_str(insert_pos, &format!("{}\n", below_text));
+            Position::new(line, line_len),
+        ));
+        let _total_after_first = buffer.line_count();
+        let below_len = buffer.chars_at_line(line);
+        let _ = buffer.delete_range(Range::new(
+            Position::new(line, 0),
+            Position::new(line, below_len),
+        ));
+        let _total_after_second = buffer.line_count();
+        let insert_below = Position::new(line, 0);
+        buffer.insert_str(insert_below, &format!("{}\n", below_text));
+        let _total_after_first_insert = buffer.line_count();
         let insert_pos2 = Position::new(line, 0);
         buffer.insert_str(insert_pos2, &format!("{}\n", line_text));
         buffer.set_modified();
@@ -223,31 +249,50 @@ impl EditOperations {
             return Err(());
         }
         let current_line_len = buffer.chars_at_line(line);
-        let newline_pos = Position::new(line, current_line_len);
-        let mut next_line_text = buffer.get_line(line + 1);
-        let leading_spaces = next_line_text.chars().take_while(|c| *c == ' ').count();
-        if leading_spaces > 0 {
-            next_line_text = next_line_text.chars().skip(leading_spaces).collect();
-        }
-        if current_line_len > 0 && !buffer.get_line(line).ends_with(' ') {
-            next_line_text.insert(0, ' ');
-        }
-        let _ = buffer.delete_char(newline_pos).ok_or(())?;
+        let next_line_text_raw = buffer.get_line(line + 1);
+        let leading_spaces = next_line_text_raw.chars().take_while(|c| *c == ' ').count();
+        let next_line_text_trimmed: String = next_line_text_raw.chars().skip(leading_spaces).collect();
+        let prev_line_raw = buffer.get_line(line);
+        let prev_trimmed = prev_line_raw.strip_suffix('\n').unwrap_or(&prev_line_raw);
+        let prev_last = prev_trimmed.chars().last();
+        let next_first = next_line_text_trimmed.chars().next();
+        let prev_ok = match prev_last {
+            Some(c) => !c.is_whitespace(),
+            None => false,
+        };
+        let next_ok = match next_first {
+            Some(c) => !c.is_whitespace() && !c.is_ascii_punctuation(),
+            None => false,
+        };
+        let needs_space = prev_ok && next_ok;
+        let to_delete_len = 1 + leading_spaces;
         let _ = buffer.delete_range(Range::new(
-            Position::new(line + 1, 0),
-            Position::new(line + 1, leading_spaces),
+            Position::new(line, current_line_len),
+            Position::new(line, current_line_len + to_delete_len),
         ));
-        buffer.insert_str(Position::new(line, buffer.chars_at_line(line)), &next_line_text);
-        cursor.position = Position::new(line, current_line_len);
-        cursor.preferred_column = cursor.position.column;
+        if needs_space {
+            buffer.insert_str(Position::new(line, current_line_len), " ");
+        }
+        let new_col = if needs_space {
+            current_line_len + 1
+        } else {
+            current_line_len
+        };
+        cursor.position = Position::new(line, new_col);
+        cursor.preferred_column = new_col;
         buffer.set_modified();
+        let new_len = if needs_space {
+            current_line_len + 1 + next_line_text_trimmed.chars().count()
+        } else {
+            current_line_len + next_line_text_trimmed.chars().count()
+        };
         Ok(ChangeKind::Replace {
             range: Range::new(
                 Position::new(line, current_line_len),
-                Position::new(line + 1, next_line_text.len()),
+                Position::new(line, new_len),
             ),
             old: "\n".to_string(),
-            new: " ".to_string(),
+            new: if needs_space { " ".to_string() } else { String::new() },
         })
     }
 
@@ -256,7 +301,7 @@ impl EditOperations {
         let line_text = buffer.get_line(line);
         let trimmed = line_text.trim_start();
         if trimmed.starts_with("//") {
-            let leading_spaces = line_text.len() - line_text.trim_start().len();
+            let leading_spaces = line_text.chars().take_while(|c| c.is_whitespace()).count();
             let start = Position::new(line, leading_spaces);
             let end = Position::new(line, leading_spaces + 2);
             buffer.delete_range(Range::new(start, end));
@@ -363,11 +408,15 @@ impl EditOperations {
             if l >= total_lines {
                 return None;
             }
-            let line_len = buffer.chars_at_line(l);
-            if c >= line_len {
-                return None;
+            let total = buffer.chars_at_line(l);
+            let excl_nl = if total > 0 && buffer.get_line(l).ends_with('\n') { total - 1 } else { total };
+            if c < excl_nl {
+                return buffer.char_at(Position::new(l, c));
             }
-            buffer.char_at(Position::new(l, c))
+            if total > 0 && c == total - 1 && buffer.get_line(l).ends_with('\n') {
+                return Some('\n');
+            }
+            None
         };
 
         let is_word_char = |c: char| -> bool {
@@ -375,7 +424,7 @@ impl EditOperations {
         };
 
         let is_whitespace = |c: char| -> bool {
-            c == ' ' || c == '\t'
+            c == ' ' || c == '\t' || c == '\n'
         };
 
         let current = get_char(line, col);
@@ -385,13 +434,14 @@ impl EditOperations {
                     if !is_whitespace(c) {
                         break;
                     }
-                    col += 1;
-                    if col > buffer.chars_at_line(line) {
-                        col = 0;
-                        line += 1;
-                        if line >= total_lines {
-                            return pos;
+                    if c == '\n' {
+                        if line + 1 >= total_lines {
+                            return Position::new(line, col);
                         }
+                        line += 1;
+                        col = 0;
+                    } else {
+                        col += 1;
                     }
                 }
                 Position::new(line, col)
@@ -402,37 +452,54 @@ impl EditOperations {
                         break;
                     }
                     col += 1;
-                    if col > buffer.chars_at_line(line) {
-                        col = 0;
-                        line += 1;
-                        if line >= total_lines {
-                            return Position::new(total_lines - 1, buffer.chars_at_line(total_lines - 1));
+                    if let Some(nl) = get_char(line, col) {
+                        if nl == '\n' {
+                            if line + 1 >= total_lines {
+                                return Position::new(line, col);
+                            }
+                            line += 1;
+                            col = 0;
                         }
+                    } else {
+                        if line + 1 >= total_lines {
+                            return Position::new(total_lines - 1, line_chars_excl_newline(buffer, total_lines - 1));
+                        }
+                        line += 1;
+                        col = 0;
                     }
                 }
                 while let Some(c) = get_char(line, col) {
                     if !is_whitespace(c) {
                         break;
                     }
-                    col += 1;
-                    if col > buffer.chars_at_line(line) {
-                        col = 0;
-                        line += 1;
-                        if line >= total_lines {
-                            return Position::new(total_lines - 1, buffer.chars_at_line(total_lines - 1));
+                    if c == '\n' {
+                        if line + 1 >= total_lines {
+                            return Position::new(line, col);
                         }
+                        line += 1;
+                        col = 0;
+                    } else {
+                        col += 1;
                     }
                 }
                 Position::new(line, col)
             }
             Some(_) => {
                 col += 1;
-                if col > buffer.chars_at_line(line) {
-                    col = 0;
-                    line += 1;
-                    if line >= total_lines {
-                        return Position::new(total_lines - 1, buffer.chars_at_line(total_lines - 1));
+                if let Some(nl) = get_char(line, col) {
+                    if nl == '\n' {
+                        if line + 1 >= total_lines {
+                            return Position::new(line, col);
+                        }
+                        line += 1;
+                        col = 0;
                     }
+                } else {
+                    if line + 1 >= total_lines {
+                        return Position::new(total_lines - 1, line_chars_excl_newline(buffer, total_lines - 1));
+                    }
+                    line += 1;
+                    col = 0;
                 }
                 Position::new(line, col)
             }
@@ -452,11 +519,15 @@ impl EditOperations {
             if l >= total_lines {
                 return None;
             }
-            let line_len = buffer.chars_at_line(l);
-            if c >= line_len {
-                return None;
+            let total = buffer.chars_at_line(l);
+            let excl_nl = if total > 0 && buffer.get_line(l).ends_with('\n') { total - 1 } else { total };
+            if c < excl_nl {
+                return buffer.char_at(Position::new(l, c));
             }
-            buffer.char_at(Position::new(l, c))
+            if total > 0 && c == total - 1 && buffer.get_line(l).ends_with('\n') {
+                return Some('\n');
+            }
+            None
         };
 
         let is_word_char = |c: char| -> bool {
@@ -464,11 +535,12 @@ impl EditOperations {
         };
 
         let is_whitespace = |c: char| -> bool {
-            c == ' ' || c == '\t'
+            c == ' ' || c == '\t' || c == '\n'
         };
 
-        if col > buffer.chars_at_line(line) {
-            col = buffer.chars_at_line(line);
+        let max_col = line_chars_excl_newline(buffer, line);
+        if col > max_col {
+            col = max_col;
         }
 
         if col == 0 {
@@ -476,7 +548,7 @@ impl EditOperations {
                 return Position::new(0, 0);
             }
             line -= 1;
-            col = buffer.chars_at_line(line);
+            col = line_chars_excl_newline(buffer, line);
         } else {
             col -= 1;
         }
@@ -488,12 +560,18 @@ impl EditOperations {
                     if !is_whitespace(c) {
                         break;
                     }
-                    if col == 0 {
+                    if c == '\n' {
                         if line == 0 {
                             return Position::new(0, 0);
                         }
                         line -= 1;
-                        col = buffer.chars_at_line(line);
+                        col = line_chars_excl_newline(buffer, line);
+                    } else if col == 0 {
+                        if line == 0 {
+                            return Position::new(0, 0);
+                        }
+                        line -= 1;
+                        col = line_chars_excl_newline(buffer, line);
                     } else {
                         col -= 1;
                     }
@@ -546,6 +624,7 @@ impl EditOperations {
         let total_lines = buffer.line_count();
         let mut line = pos.line;
         let mut col = pos.column + 1;
+        let mut in_string: Option<char> = None;
         loop {
             if line >= total_lines {
                 return None;
@@ -554,15 +633,28 @@ impl EditOperations {
             if col >= line_len {
                 line += 1;
                 col = 0;
+                in_string = None;
                 continue;
             }
             let c = buffer.char_at(Position::new(line, col))?;
-            if c == open {
-                depth += 1;
-            } else if c == close {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(Position::new(line, col));
+            match in_string {
+                Some(q) if c == q => {
+                    in_string = None;
+                }
+                Some(_) => {}
+                None => {
+                    if c == '"' || c == '\'' {
+                        in_string = Some(c);
+                    } else if c == '\\' {
+                        col += 1;
+                    } else if c == open {
+                        depth += 1;
+                    } else if c == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(Position::new(line, col));
+                        }
+                    }
                 }
             }
             col += 1;
@@ -582,15 +674,32 @@ impl EditOperations {
         } else {
             col -= 1;
         }
+        let mut in_string: Option<char> = None;
+        let mut prev_was_escape = false;
         loop {
-            let c = buffer.char_at(Position::new(line, col))?;
-            if c == close {
-                depth += 1;
-            } else if c == open {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(Position::new(line, col));
+            if !prev_was_escape {
+                let c = buffer.char_at(Position::new(line, col))?;
+                match in_string {
+                    Some(q) if c == q => {
+                        in_string = None;
+                    }
+                    Some(_) => {}
+                    None => {
+                        if c == '"' || c == '\'' {
+                            in_string = Some(c);
+                        } else if c == open {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(Position::new(line, col));
+                            }
+                        } else if c == close {
+                            depth += 1;
+                        }
+                    }
                 }
+                prev_was_escape = c == '\\';
+            } else {
+                prev_was_escape = false;
             }
             if col == 0 {
                 if line == 0 {
@@ -598,6 +707,8 @@ impl EditOperations {
                 }
                 line -= 1;
                 col = buffer.chars_at_line(line);
+                in_string = None;
+                prev_was_escape = false;
             } else {
                 col -= 1;
             }

@@ -53,28 +53,32 @@ impl LineNumbers {
     }
 
     fn format_padded(num: &str, width: usize) -> String {
-        if num.len() >= width {
-            format!("{} ", &num[..width.saturating_sub(1)])
+        if num.chars().count() >= width {
+            let truncated = char_truncate(num, width.saturating_sub(1));
+            format!("{} ", truncated)
         } else {
-            let padding = width.saturating_sub(num.len()).saturating_sub(1);
+            let padding = width.saturating_sub(num.chars().count()).saturating_sub(1);
             format!("{}{} ", " ".repeat(padding), num)
         }
     }
 
     pub fn format_line_number(line: usize, _idx: usize, current_line: usize, relative: bool) -> String {
         if relative {
-            if line == current_line + 1 {
+            if line == current_line {
                 line.to_string()
             } else {
-                let diff = if line > current_line + 1 {
-                    line - current_line - 1
-                } else {
-                    current_line + 1 - line
-                };
-                diff.to_string()
+                line.abs_diff(current_line).to_string()
             }
         } else {
             line.to_string()
         }
+    }
+}
+
+fn char_truncate(s: &str, max_chars: usize) -> &str {
+    if let Some((i, _)) = s.char_indices().nth(max_chars) {
+        &s[..i]
+    } else {
+        s
     }
 }

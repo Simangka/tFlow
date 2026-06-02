@@ -1,6 +1,17 @@
 use crate::commands::actions::Action;
 use std::collections::HashMap;
 
+pub const MAX_DYNAMIC_ACTIONS: usize = 1024;
+
+pub fn validate_open_path(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let canonical = path.canonicalize()
+        .map_err(|e| anyhow::anyhow!("invalid path {:?}: {}", path, e))?;
+    if !canonical.is_file() {
+        anyhow::bail!("not a file: {:?}", canonical);
+    }
+    Ok(canonical)
+}
+
 pub type CommandFn = Box<dyn Fn(&mut crate::app::AppContext) -> Result<(), String> + Send + Sync>;
 
 #[derive(Debug, Clone)]
@@ -145,6 +156,7 @@ fn find_backward_match(buffer: &crate::core::buffer::Buffer, pos: crate::core::P
 pub struct CommandRegistry {
     pub commands: HashMap<String, RegisteredCommand>,
     pub aliases: HashMap<String, String>,
+    pub dynamic_actions: Vec<Action>,
 }
 
 impl CommandRegistry {
@@ -152,6 +164,7 @@ impl CommandRegistry {
         let mut reg = Self {
             commands: HashMap::new(),
             aliases: HashMap::new(),
+            dynamic_actions: Vec::new(),
         };
         reg.register_defaults();
         reg
@@ -263,9 +276,18 @@ impl CommandRegistry {
         self.aliases.insert(alias.to_string(), target.to_string());
     }
 
+    pub fn register_dynamic(&mut self, action: Action) -> Result<(), Action> {
+        if self.dynamic_actions.len() >= MAX_DYNAMIC_ACTIONS {
+            return Err(action);
+        }
+        self.dynamic_actions.push(action);
+        Ok(())
+    }
+
     pub fn execute(&self, name: &str, _args: &[String], ctx: &mut crate::app::AppContext) -> Result<(), String> {
         let resolved_name = self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name);
         let cmd = self.commands.get(resolved_name).ok_or_else(|| {
+            tracing::error!(command = name, "unknown command");
             format!("Unknown command: {}", name)
         })?;
         if let Some(ref handler) = cmd.handler {
@@ -274,6 +296,7 @@ impl CommandRegistry {
         if let Some(ref action) = cmd.action {
             return self.execute_action(action, ctx);
         }
+        tracing::error!(command = name, "command has no handler or action");
         Err(format!("Command '{}' has no handler or action", name))
     }
 
@@ -915,15 +938,19 @@ impl CommandRegistry {
                         "File saved",
                     ));
                 } else {
-                    ctx.notifications.push(crate::core::types::Notification::info(
-                        "Use :w <path> to save as",
-                    ));
+                    return Err("Save requires a path; use SaveAs or open a file first".to_string());
                 }
             }
+            Action::OpenFileAt(ref path_str) => {
+                let path = std::path::PathBuf::from(path_str);
+                let safe = validate_open_path(&path).map_err(|e| format!("{}", e))?;
+                ctx.open_file(safe).map_err(|e| format!("Failed to open: {}", e))?;
+            }
+            Action::SaveAs => {
+                return Err("SaveAs requires a non-empty path".to_string());
+            }
             Action::SaveFileAs => {
-                ctx.notifications.push(crate::core::types::Notification::info(
-                    "Save as not yet implemented",
-                ));
+                return Err("SaveFileAs requires a non-empty path".to_string());
             }
             Action::CloseFile => {
                 if ctx.buffers[ctx.active_buffer].dirty {
@@ -1053,6 +1080,14 @@ impl CommandRegistry {
     pub fn get(&self, name: &str) -> Option<&RegisteredCommand> {
         let resolved = self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name);
         self.commands.get(resolved)
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<&RegisteredCommand> {
+        if let Some(cmd) = self.get(name) {
+            return Some(cmd);
+        }
+        let lower = name.to_ascii_lowercase();
+        self.get(&lower)
     }
 
     pub fn complete(&self, prefix: &str) -> Vec<String> {

@@ -5,8 +5,9 @@ use lsp_types::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::Instant;
 
 #[derive(Debug)]
@@ -30,13 +31,16 @@ pub struct LanguageClient {
     pub state: ClientState,
     pub server_capabilities: Option<ServerCapabilities>,
 
-    pub writer: Option<RpcWriter>,
+    pub writer: Option<Arc<Mutex<RpcWriter>>>,
     document_states: HashMap<DocumentId, DocumentSyncState>,
-    pending_requests: HashMap<RequestId, PendingRequest>,
+    pending_requests: Arc<Mutex<HashMap<RequestId, PendingRequest>>>,
+    version_counters: HashMap<lsp_types::Url, Arc<AtomicI32>>,
     workspace_root: Option<PathBuf>,
 
     request_id_gen: Arc<AtomicU64>,
     event_tx: mpsc::UnboundedSender<LspEvent>,
+    #[allow(dead_code)]
+    stop_flag: Arc<Notify>,
 }
 
 impl LanguageClient {
@@ -44,27 +48,42 @@ impl LanguageClient {
         language: LanguageId,
         event_tx: mpsc::UnboundedSender<LspEvent>,
     ) -> Self {
-        Self {
-            language,
+        let stop_flag = Arc::new(Notify::new());
+        let pending_requests: Arc<Mutex<HashMap<RequestId, PendingRequest>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let client = Self {
+            language: language.clone(),
             state: ClientState::Starting,
             server_capabilities: None,
             writer: None,
             document_states: HashMap::new(),
-            pending_requests: HashMap::new(),
+            pending_requests: pending_requests.clone(),
+            version_counters: HashMap::new(),
             workspace_root: None,
             request_id_gen: Arc::new(AtomicU64::new(1)),
             event_tx,
-        }
+            stop_flag: stop_flag.clone(),
+        };
+
+        tokio::spawn(sweeper_task(
+            language,
+            stop_flag,
+            pending_requests,
+        ));
+
+        client
     }
 
     pub fn set_writer(&mut self, writer: RpcWriter) {
-        self.writer = Some(writer);
+        self.writer = Some(Arc::new(Mutex::new(writer)));
     }
 
     pub fn has_capability(&self, check: impl FnOnce(&ServerCapabilities) -> bool) -> bool {
         self.server_capabilities.as_ref().map_or(false, check)
     }
 
+    #[allow(deprecated)]
     pub async fn send_initialize(
         &mut self,
         workspace_root: Option<PathBuf>,
@@ -73,7 +92,8 @@ impl LanguageClient {
         self.state = ClientState::Initializing;
         self.workspace_root = workspace_root;
 
-        let writer = self.writer.as_mut().ok_or("No writer")?;
+        let writer = self.writer.as_ref().ok_or("No writer")?;
+        let mut writer = writer.lock().await;
 
         let workspace_folders = self.workspace_root.as_ref().map(|root| {
             vec![WorkspaceFolder {
@@ -219,7 +239,7 @@ impl LanguageClient {
             Some(serde_json::to_value(params).unwrap()),
         ).await.map_err(|e| e.to_string())?;
 
-        self.pending_requests.insert(id, PendingRequest {
+        self.pending_requests.lock().await.insert(id, PendingRequest {
             method: "initialize".into(),
             doc_id: None,
             sent_at: Instant::now(),
@@ -248,7 +268,7 @@ impl LanguageClient {
         result: Option<serde_json::Value>,
         error: Option<JsonRpcError>,
     ) -> Result<(), String> {
-        let pending = self.pending_requests.remove(&id);
+        let pending = self.pending_requests.lock().await.remove(&id);
         let method = pending.as_ref().map(|p| p.method.as_str()).unwrap_or("unknown");
 
         if let Some(ref err) = error {
@@ -271,8 +291,9 @@ impl LanguageClient {
                     let caps = init_result.capabilities.clone();
                     self.server_capabilities = Some(caps.clone());
 
-                    if let Some(ref mut writer) = self.writer {
-                        let _ = writer.send_notification("initialized", Some(serde_json::json!({}))).await;
+                    if let Some(writer) = self.writer.as_ref() {
+                        let mut w = writer.lock().await;
+                        let _ = w.send_notification("initialized", Some(serde_json::json!({}))).await;
                     }
 
                     self.state = ClientState::Initialized;
@@ -290,8 +311,9 @@ impl LanguageClient {
             }
             "shutdown" => {
                 self.state = ClientState::Shutdown;
-                if let Some(ref mut writer) = self.writer {
-                    let _ = writer.send_notification("exit", None).await;
+                if let Some(writer) = self.writer.as_ref() {
+                    let mut w = writer.lock().await;
+                    let _ = w.send_notification("exit", None).await;
                 }
             }
             "textDocument/completion" => {
@@ -429,9 +451,10 @@ impl LanguageClient {
         &mut self,
         id: RequestId,
         method: &str,
-        params: Option<serde_json::Value>,
+        _params: Option<serde_json::Value>,
     ) -> Result<(), String> {
-        let writer = self.writer.as_mut().ok_or("No writer")?;
+        let writer = self.writer.as_ref().ok_or("No writer")?;
+        let mut writer = writer.lock().await;
         match method {
             "window/workDoneProgress/create" => {
                 writer.send_response(id, Some(serde_json::json!(null)), None).await
@@ -487,11 +510,15 @@ impl LanguageClient {
             ),
             None => return,
         };
+        self.version_counters
+            .entry(state_copy.0.clone())
+            .or_insert_with(|| Arc::new(AtomicI32::new(1)));
         if self.state == ClientState::Initialized {
-            let writer = match self.writer.as_mut() {
+            let writer = match self.writer.as_ref() {
                 Some(w) => w,
                 None => return,
             };
+            let mut writer = writer.lock().await;
             let params = DidOpenTextDocumentParams {
                 text_document: TextDocumentItem {
                     uri: state_copy.0,
@@ -507,23 +534,30 @@ impl LanguageClient {
         }
     }
 
-    pub async fn send_did_change(&mut self, doc_id: DocumentId, version: i32, changes: Vec<TextDocumentContentChangeEvent>) {
+    pub async fn send_did_change(&mut self, doc_id: DocumentId, _version: i32, changes: Vec<TextDocumentContentChangeEvent>) {
         let state = match self.get_document_mut(doc_id) {
             Some(s) => s,
             None => return,
         };
         state.apply_changes(&changes);
         let state_uri = state.uri.clone();
-        let state_version = state.version;
 
         if self.state != ClientState::Initialized {
             return;
         }
 
-        let writer = match self.writer.as_mut() {
+        let state_version = self
+            .version_counters
+            .entry(state_uri.clone())
+            .or_insert_with(|| Arc::new(AtomicI32::new(1)))
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+
+        let writer = match self.writer.as_ref() {
             Some(w) => w,
             None => return,
         };
+        let mut writer = writer.lock().await;
 
         let text_doc = VersionedTextDocumentIdentifier {
             uri: state_uri,
@@ -540,6 +574,31 @@ impl LanguageClient {
         ).await;
     }
 
+    pub async fn did_change_incremental(
+        &self,
+        uri: lsp_types::Url,
+        version: i32,
+        changes: Vec<TextDocumentContentChangeEvent>,
+    ) -> anyhow::Result<()> {
+        let writer = self.writer.as_ref().ok_or_else(|| anyhow::anyhow!("No writer"))?;
+        let mut writer = writer.lock().await;
+        let text_doc = VersionedTextDocumentIdentifier {
+            uri,
+            version,
+        };
+        let params = DidChangeTextDocumentParams {
+            text_document: text_doc,
+            content_changes: changes,
+        };
+        writer
+            .send_notification(
+                "textDocument/didChange",
+                Some(serde_json::to_value(params)?),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn send_did_save(&mut self, doc_id: DocumentId) {
         let uri = match self.get_document(doc_id) {
             Some(s) => s.uri.clone(),
@@ -548,10 +607,11 @@ impl LanguageClient {
         if self.state != ClientState::Initialized {
             return;
         }
-        let writer = match self.writer.as_mut() {
+        let writer = match self.writer.as_ref() {
             Some(w) => w,
             None => return,
         };
+        let mut writer = writer.lock().await;
         let text_doc = TextDocumentIdentifier { uri };
         let params = DidSaveTextDocumentParams {
             text_document: text_doc,
@@ -568,13 +628,15 @@ impl LanguageClient {
             Some(s) => s,
             None => return,
         };
+        self.version_counters.remove(&state.uri);
         if self.state != ClientState::Initialized {
             return;
         }
-        let writer = match self.writer.as_mut() {
+        let writer = match self.writer.as_ref() {
             Some(w) => w,
             None => return,
         };
+        let mut writer = writer.lock().await;
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri: state.uri },
         };
@@ -590,13 +652,14 @@ impl LanguageClient {
         position: Position,
         trigger_kind: Option<CompletionTriggerKind>,
         trigger_character: Option<String>,
-        request_id: RequestId,
+        _request_id: RequestId,
     ) -> Result<(), String> {
         if self.state != ClientState::Initialized {
             return Ok(());
         }
         let uri = self.get_document(doc_id).map(|s| s.uri.clone()).ok_or("Document not found")?;
-        let writer = self.writer.as_mut().ok_or("No writer")?;
+        let writer = self.writer.as_ref().ok_or("No writer")?;
+        let mut writer = writer.lock().await;
         let params = CompletionParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri },
@@ -613,7 +676,7 @@ impl LanguageClient {
             "textDocument/completion",
             Some(serde_json::to_value(params).unwrap()),
         ).await.map_err(|e| e.to_string())?;
-        self.pending_requests.insert(id, PendingRequest {
+        self.pending_requests.lock().await.insert(id, PendingRequest {
             method: "textDocument/completion".into(),
             doc_id: Some(doc_id),
             sent_at: Instant::now(),
@@ -630,7 +693,8 @@ impl LanguageClient {
             return Ok(());
         }
         let uri = self.get_document(doc_id).map(|s| s.uri.clone()).ok_or("Document not found")?;
-        let writer = self.writer.as_mut().ok_or("No writer")?;
+        let writer = self.writer.as_ref().ok_or("No writer")?;
+        let mut writer = writer.lock().await;
         let params = HoverParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri },
@@ -642,7 +706,7 @@ impl LanguageClient {
             "textDocument/hover",
             Some(serde_json::to_value(params).unwrap()),
         ).await.map_err(|e| e.to_string())?;
-        self.pending_requests.insert(id, PendingRequest {
+        self.pending_requests.lock().await.insert(id, PendingRequest {
             method: "textDocument/hover".into(),
             doc_id: Some(doc_id),
             sent_at: Instant::now(),
@@ -659,7 +723,8 @@ impl LanguageClient {
             return Ok(());
         }
         let uri = self.get_document(doc_id).map(|s| s.uri.clone()).ok_or("Document not found")?;
-        let writer = self.writer.as_mut().ok_or("No writer")?;
+        let writer = self.writer.as_ref().ok_or("No writer")?;
+        let mut writer = writer.lock().await;
         let params = GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri },
@@ -672,7 +737,7 @@ impl LanguageClient {
             "textDocument/definition",
             Some(serde_json::to_value(params).unwrap()),
         ).await.map_err(|e| e.to_string())?;
-        self.pending_requests.insert(id, PendingRequest {
+        self.pending_requests.lock().await.insert(id, PendingRequest {
             method: "textDocument/definition".into(),
             doc_id: Some(doc_id),
             sent_at: Instant::now(),
@@ -690,7 +755,8 @@ impl LanguageClient {
             return Ok(());
         }
         let uri = self.get_document(doc_id).map(|s| s.uri.clone()).ok_or("Document not found")?;
-        let writer = self.writer.as_mut().ok_or("No writer")?;
+        let writer = self.writer.as_ref().ok_or("No writer")?;
+        let mut writer = writer.lock().await;
         let params = ReferenceParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri },
@@ -706,7 +772,7 @@ impl LanguageClient {
             "textDocument/references",
             Some(serde_json::to_value(params).unwrap()),
         ).await.map_err(|e| e.to_string())?;
-        self.pending_requests.insert(id, PendingRequest {
+        self.pending_requests.lock().await.insert(id, PendingRequest {
             method: "textDocument/references".into(),
             doc_id: Some(doc_id),
             sent_at: Instant::now(),
@@ -722,7 +788,8 @@ impl LanguageClient {
             return Ok(());
         }
         let uri = self.get_document(doc_id).map(|s| s.uri.clone()).ok_or("Document not found")?;
-        let writer = self.writer.as_mut().ok_or("No writer")?;
+        let writer = self.writer.as_ref().ok_or("No writer")?;
+        let mut writer = writer.lock().await;
         let params = SemanticTokensParams {
             text_document: TextDocumentIdentifier { uri },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -732,7 +799,7 @@ impl LanguageClient {
             "textDocument/semanticTokens/full",
             Some(serde_json::to_value(params).unwrap()),
         ).await.map_err(|e| e.to_string())?;
-        self.pending_requests.insert(id, PendingRequest {
+        self.pending_requests.lock().await.insert(id, PendingRequest {
             method: "textDocument/semanticTokens".into(),
             doc_id: Some(doc_id),
             sent_at: Instant::now(),
@@ -741,22 +808,52 @@ impl LanguageClient {
     }
 
     pub fn cancel_request(&mut self, method: &str) {
-        self.pending_requests.retain(|id, req| {
-            if req.method == method {
-                if let Some(ref mut writer) = self.writer {
-                    let cancel_params = CancelParams {
-                        id: NumberOrString::Number(*id as i32),
-                    };
-                    let _ = writer.send_notification(
-                        "$/cancelRequest",
-                        Some(serde_json::to_value(cancel_params).unwrap()),
-                    );
+        let mut to_cancel: Vec<u64> = Vec::new();
+        {
+            let mut guard = match self.pending_requests.try_lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard.retain(|id, req| {
+                if req.method == method {
+                    to_cancel.push(*id);
+                    false
+                } else {
+                    true
                 }
-                false
-            } else {
-                true
-            }
-        });
+            });
+        }
+
+        if to_cancel.is_empty() {
+            return;
+        }
+
+        let writer = match self.writer.as_ref() {
+            Some(w) => w.clone(),
+            None => return,
+        };
+
+        for id in to_cancel {
+            let writer = writer.clone();
+            tokio::spawn(async move {
+                let id_value = if id > i32::MAX as u64 {
+                    serde_json::Value::String(id.to_string())
+                } else {
+                    serde_json::Value::Number(serde_json::Number::from(id))
+                };
+                let params = serde_json::json!({"id": id_value});
+                let mut w = writer.lock().await;
+                if let Err(e) = w
+                    .send_notification(
+                        "$/cancelRequest",
+                        Some(params),
+                    )
+                    .await
+                {
+                    tracing::warn!("cancel_request failed: {}", e);
+                }
+            });
+        }
     }
 
     pub fn cancel_all_completions(&mut self) {
@@ -768,23 +865,30 @@ impl LanguageClient {
     }
 
     pub fn has_pending_completion(&self) -> bool {
-        self.pending_requests.values().any(|r| r.method == "textDocument/completion")
+        match self.pending_requests.try_lock() {
+            Ok(g) => g.values().any(|r| r.method == "textDocument/completion"),
+            Err(_) => false,
+        }
     }
 
     pub fn has_pending_request(&self, method: &str) -> bool {
-        self.pending_requests.values().any(|r| r.method == method)
+        match self.pending_requests.try_lock() {
+            Ok(g) => g.values().any(|r| r.method == method),
+            Err(_) => false,
+        }
     }
 
     pub async fn send_shutdown(&mut self) {
         if self.state != ClientState::Initialized {
             return;
         }
-        let writer = match self.writer.as_mut() {
+        let writer = match self.writer.as_ref() {
             Some(w) => w,
             None => return,
         };
+        let mut writer = writer.lock().await;
         if let Ok(id) = writer.send_request("shutdown", None).await {
-            self.pending_requests.insert(id, PendingRequest {
+            self.pending_requests.lock().await.insert(id, PendingRequest {
                 method: "shutdown".into(),
                 doc_id: None,
                 sent_at: Instant::now(),
@@ -798,5 +902,37 @@ impl LanguageClient {
 
     pub fn has_document(&self, doc_id: DocumentId) -> bool {
         self.document_states.contains_key(&doc_id)
+    }
+}
+
+async fn sweeper_task(
+    language: LanguageId,
+    stop_flag: Arc<Notify>,
+    pending: Arc<Mutex<HashMap<RequestId, PendingRequest>>>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    let timeout = Duration::from_secs(30);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let now = Instant::now();
+                let mut guard = pending.lock().await;
+                guard.retain(|id, p| {
+                    if now.duration_since(p.sent_at) > timeout {
+                        tracing::warn!(
+                            language = %language,
+                            request_id = id,
+                            method = %p.method,
+                            "Dropping stale LSP request (no response within {:?})",
+                            timeout
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            _ = stop_flag.notified() => break,
+        }
     }
 }

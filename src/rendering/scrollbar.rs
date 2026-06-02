@@ -48,7 +48,7 @@ impl ScrollbarRenderer {
 
         for i in 0..scrollbar_height {
             if i >= thumb_pos && i < thumb_pos + thumb_height {
-                let thumb_char = if area.width >= 2 { "█" } else { "█" };
+                let thumb_char = "█";
                 let padded = format!("{:width$}", thumb_char, width = area.width as usize);
                 let span = Span::styled(padded, Style::default().fg(theme.scrollbar));
                 lines.push(ratatui::text::Line::from(vec![span]));

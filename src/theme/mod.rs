@@ -32,6 +32,9 @@ pub struct Theme {
     pub heading1: Color,
     pub heading2: Color,
     pub heading3: Color,
+    pub heading4: Color,
+    pub heading5: Color,
+    pub heading6: Color,
     pub link: Color,
     pub list: Color,
     pub blockquote: Color,
@@ -130,6 +133,9 @@ impl Theme {
             heading1: Color::Rgb(255, 160, 60),
             heading2: Color::Rgb(200, 140, 80),
             heading3: Color::Rgb(160, 120, 100),
+            heading4: Color::Rgb(140, 120, 120),
+            heading5: Color::Rgb(130, 130, 140),
+            heading6: Color::Rgb(140, 140, 160),
             link: Color::Rgb(60, 160, 220),
             list: Color::Rgb(160, 200, 120),
             blockquote: Color::Rgb(140, 140, 140),
@@ -186,6 +192,9 @@ impl Theme {
         t.heading1 = Color::Rgb(255, 200, 0);
         t.heading2 = Color::Rgb(200, 160, 0);
         t.heading3 = Color::Rgb(150, 120, 0);
+        t.heading4 = Color::Rgb(120, 100, 0);
+        t.heading5 = Color::Rgb(100, 80, 0);
+        t.heading6 = Color::Rgb(80, 70, 0);
         t.link = Color::Rgb(0, 200, 255);
         t.list = Color::Rgb(51, 255, 51);
         t.blockquote = Color::Rgb(0, 120, 0);
@@ -236,6 +245,9 @@ impl Theme {
         t.heading1 = Color::Rgb(255, 200, 50);
         t.heading2 = Color::Rgb(200, 160, 40);
         t.heading3 = Color::Rgb(160, 130, 30);
+        t.heading4 = Color::Rgb(130, 100, 20);
+        t.heading5 = Color::Rgb(100, 80, 15);
+        t.heading6 = Color::Rgb(80, 60, 10);
         t.link = Color::Rgb(100, 200, 255);
         t.list = Color::Rgb(255, 176, 0);
         t.blockquote = Color::Rgb(120, 90, 0);
@@ -280,6 +292,9 @@ impl Theme {
         t.heading1 = Color::Rgb(255, 100, 200);
         t.heading2 = Color::Rgb(200, 80, 160);
         t.heading3 = Color::Rgb(160, 60, 130);
+        t.heading4 = Color::Rgb(130, 50, 110);
+        t.heading5 = Color::Rgb(110, 40, 90);
+        t.heading6 = Color::Rgb(90, 30, 80);
         t.link = Color::Rgb(80, 200, 255);
         t.list = Color::Rgb(200, 120, 255);
         t.blockquote = Color::Rgb(120, 100, 140);
@@ -324,6 +339,9 @@ impl Theme {
         t.heading1 = Color::Rgb(247, 118, 142);
         t.heading2 = Color::Rgb(224, 175, 104);
         t.heading3 = Color::Rgb(158, 206, 106);
+        t.heading4 = Color::Rgb(122, 162, 90);
+        t.heading5 = Color::Rgb(100, 130, 80);
+        t.heading6 = Color::Rgb(86, 91, 118);
         t.link = Color::Rgb(97, 175, 239);
         t.list = Color::Rgb(137, 130, 208);
         t.blockquote = Color::Rgb(100, 106, 140);

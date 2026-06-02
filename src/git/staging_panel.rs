@@ -50,14 +50,20 @@ impl StagingPanel {
                         self.data.push(StagingEntry::Hunk {
                             file: entry.path.clone(),
                             hunk: hunk.clone(),
-                            staged: entry.staged,
+                            staged: false,
                         });
                     }
                 }
             }
         }
         self.entries = (0..self.data.len()).collect();
-        self.selected = self.selected.min(self.data.len().saturating_sub(1));
+        self.clamp_cursor();
+    }
+
+    pub fn clamp_cursor(&mut self) {
+        let max = self.data.len().saturating_sub(1);
+        if self.selected > max { self.selected = max; }
+        if self.scroll > max { self.scroll = max; }
     }
 
     pub fn toggle_expand(&mut self, file_path: &str) {
