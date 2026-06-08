@@ -63,6 +63,9 @@ impl EventLoop {
             crate::lsp::run_lsp_manager(lsp_cmd_rx, lsp_event_tx, Some(lsp_lang_config), Some(lsp_lsp_config)).await;
         });
 
+        // Start file system watcher for real-time file tree updates
+        ctx.watch_workspace();
+
         for file in &files {
             let path = std::path::PathBuf::from(file);
             if path.exists() {

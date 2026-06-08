@@ -67,6 +67,8 @@ pub struct AppContext {
     pub last_keypress: std::time::Instant,
     pub completion_pending: bool,
     pub lsp_enabled: bool,
+    pub file_watch_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    pub file_tree_needs_refresh: bool,
 }
 
 impl AppContext {
@@ -160,7 +162,17 @@ impl AppContext {
             last_keypress: std::time::Instant::now(),
             completion_pending: false,
             lsp_enabled: true,
+            file_watch_rx: None,
+            file_tree_needs_refresh: false,
         }
+    }
+
+    /// Start the background file watcher to detect filesystem changes.
+    pub fn watch_workspace(&mut self) {
+        let root = self.config.workspace.root_path.clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let rx = crate::async_tasks::task_queue::start_file_watcher(root);
+        self.file_watch_rx = Some(rx);
     }
 
     pub fn active_buffer(&self) -> &Buffer {
@@ -1467,6 +1479,22 @@ impl AppContext {
     pub fn tick(&mut self) {
         self.notifications.retain(|n| !n.expired());
         self.cursor.toggle_blink();
+
+        if let Some(rx) = &mut self.file_watch_rx {
+            while rx.try_recv().is_ok() {
+                self.file_tree_needs_refresh = true;
+                self.cached_files.clear();
+            }
+        }
+
+        if self.file_tree_needs_refresh {
+            self.file_tree_needs_refresh = false;
+            if self.layout.show_file_tree {
+                if let Some(ref mut ft) = self.file_tree {
+                    let _ = ft.refresh();
+                }
+            }
+        }
     }
 
     pub fn get_clipboard_text(&mut self) -> Option<String> {

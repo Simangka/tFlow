@@ -1,8 +1,50 @@
 use tokio::sync::mpsc;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use notify::Watcher;
 use crate::async_tasks::{Task, TaskResult, TaskId, RecoveryFile, MarkdownLine};
 use crate::workspace::SearchResult;
+
+/// Start a background file watcher that debounces filesystem events
+/// and sends a signal through the returned receiver when changes occur.
+/// The watcher runs on a dedicated OS thread and monitors the given root path recursively.
+pub fn start_file_watcher(root: PathBuf) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+    let (debounce_tx, debounce_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    std::thread::Builder::new()
+        .name("tflow-fs-watch".into())
+        .spawn(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut watcher = match notify::RecommendedWatcher::new(
+                tx,
+                notify::Config::default(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("[tflow] file watcher creation failed: {}", e);
+                    return;
+                }
+            };
+            if let Err(e) = watcher.watch(&root, notify::RecursiveMode::Recursive) {
+                eprintln!("[tflow] file watcher watch failed for {:?}: {}", root, e);
+                return;
+            }
+
+            let debounce = std::time::Duration::from_millis(200);
+            loop {
+                match rx.recv() {
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                std::thread::sleep(debounce);
+                while rx.try_recv().is_ok() {}
+                let _ = debounce_tx.send(());
+            }
+        })
+        .ok();
+
+    debounce_rx
+}
 
 #[derive(Debug)]
 pub struct TaskQueue {
