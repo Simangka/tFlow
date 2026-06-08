@@ -1,4 +1,5 @@
 use crate::terminal::pty::TerminalProcess;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 const MAX_SCROLLBACK: usize = 5000;
@@ -31,6 +32,12 @@ pub struct TerminalInstance {
     pub scroll_offset: usize,
     pub shell: String,
     pub state: TerminalState,
+    /// Set to `Some(Instant)` when `drain_output` processes a pipe-break redraw
+    /// signal.  The event loop checks this flag and, if the elapsed time is
+    /// less than 100ms, consumes the next keypress (typically Enter) instead
+    /// of forwarding it to the shell — preventing the double-prompt that would
+    /// otherwise appear when the unblocking Enter executes an empty command.
+    pub pending_after_pipe_break: Option<Instant>,
 }
 
 impl TerminalInstance {
@@ -45,6 +52,7 @@ impl TerminalInstance {
             scroll_offset: 0,
             shell: shell.to_string(),
             state: TerminalState::Running,
+            pending_after_pipe_break: None,
         })
     }
 
@@ -59,6 +67,7 @@ impl TerminalInstance {
         self.parser = vt100::Parser::new(rows, cols, MAX_SCROLLBACK);
         self.state = TerminalState::Running;
         self.scroll_offset = 0;
+        self.pending_after_pipe_break = None;
         Ok(())
     }
 
@@ -72,10 +81,19 @@ impl TerminalInstance {
         // main screen buffer. Inject the reset sequences so the prompt reappears
         // immediately (no need to mash Enter).
         while let Ok(()) = self.redraw_rx.try_recv() {
-            // CSI ? 1049 l — switch from alternate screen buffer to normal screen
-            self.parser.process(b"\x1b[?1049l");
-            // CSI ? 25 h — show cursor (some TUIs hide it on exit)
-            self.parser.process(b"\x1b[?25h");
+            // Mark that we are in the pipe-break recovery window so the
+            // event loop can consume the unblocking keypress (typically
+            // Enter) instead of forwarding it to the shell and causing
+            // a double-prompt.
+            //
+            // NOTE: we deliberately do NOT inject \x1b[?1049l here.
+            // On Windows ConPTY the shell will send its own prompt
+            // bytes (which include leaving alt screen if needed) once
+            // the output buffer is flushed.  Manually injecting the
+            // sequence when no alt screen was actually entered corrupts
+            // the vt100 parser state, which in turn can cause the
+            // Disconnected branch below to fire spuriously.
+            self.pending_after_pipe_break = Some(Instant::now());
         }
 
         // Process at most a few chunks per drain so the renderer sees each

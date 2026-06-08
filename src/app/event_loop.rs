@@ -14,6 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph, List, ListItem, Clear, Wrap};
 use ratatui::text::{Span, Line};
 use ratatui::style::{Style, Modifier, Color};
+use std::time::Duration;
 
 
 /// Suspend TUI input, hand terminal to a shell, then resume.
@@ -499,6 +500,24 @@ impl EventLoop {
                     // state changes are visible before we check below.
                     ctx.terminal_panel.drain_all();
 
+                    // If we just processed a pipe-break redraw signal, consume
+                    // this keypress (typically Enter) instead of forwarding it
+                    // to the shell.  The Enter would otherwise be echoed back
+                    // and execute an empty command, producing a double-prompt.
+                    // The guard fires within the first 2000ms of the pipe break
+                    // (generous enough to survive a tick-first + slow-user-Enter
+                    // race, narrow enough that legitimate keystrokes minutes
+                    // later are never affected).
+                    if let Some(inst) = ctx.terminal_panel.active_mut() {
+                        let consume = inst.pending_after_pipe_break
+                            .map(|t| t.elapsed() < Duration::from_millis(2000))
+                            .unwrap_or(false);
+                        if consume {
+                            inst.pending_after_pipe_break = None;
+                            return Ok(());
+                        }
+                    }
+
                     // If the terminal session has ended, restart on keypress.
                     if ctx.terminal_panel.active()
                         .map_or(false, |inst| !inst.is_running())
@@ -749,6 +768,16 @@ impl EventLoop {
 
     fn handle_tick(ctx: &mut AppContext) {
         ctx.tick();
+        if ctx.terminal_panel.visible {
+            ctx.terminal_panel.drain_all();
+
+            // NOTE: a DSR (\x1b[5n) nudge was previously sent here as a
+            // Windows ConPTY freeze workaround, but the trailing 'n' leaks
+            // through to non-alt-screen TUIs (ollama, etc.) and appears as
+            // unwanted input.  The other mechanisms — Err polling in the
+            // reader, drain-on-tick, consume-guard — handle the freeze
+            // acceptably without the DSR side-effect.
+        }
     }
 
     fn render(terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, ctx: &mut AppContext) -> Result<(), anyhow::Error> {

@@ -1,7 +1,6 @@
 use portable_pty::{PtySize, CommandBuilder, Child, MasterPty, SlavePty};
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use parking_lot::Mutex;
 
@@ -44,11 +43,13 @@ impl TerminalProcess {
             .map_err(|e| format!("writer: {}", e))?;
 
         let master = Arc::new(Mutex::new(pair.master));
+        let writer_arc = Arc::new(Mutex::new(writer));
         let child = Arc::new(Mutex::new(Some(child)));
         let (tx, rx) = mpsc::unbounded_channel();
         let (redraw_tx, redraw_rx) = mpsc::unbounded_channel();
 
         let master_clone = master.clone();
+        let child_clone = child.clone();
         let redraw_tx_clone = redraw_tx.clone();
         std::thread::spawn(move || {
             let mut r = match master_clone.lock().try_clone_reader() {
@@ -59,64 +60,54 @@ impl TerminalProcess {
                 }
             };
             let mut buf = vec![0u8; 16384];
-            let mut zero_count: u32 = 0;
-            let mut zero_start: Option<Instant> = None;
-            let mut pipe_was_broken = false;
             loop {
                 match r.read(&mut buf) {
                     Ok(0) => {
-                        // ConPTY pipe broken (child process exited).
-                        pipe_was_broken = true;
-                        zero_count += 1;
-                        if zero_start.is_none() {
-                            zero_start = Some(Instant::now());
-                        }
-
-                        // Hard timeout: pipe broken too long → force break.
-                        if zero_start.map_or(false, |t| t.elapsed() > Duration::from_secs(5)) {
-                            break;
-                        }
-
-                        // NOTE: an earlier draft had a `try_wait()` liveness
-                        // check here that broke out of the loop as soon as
-                        // ConPTY reported the shell as exited. On Windows,
-                        // ConPTY has a habit of briefly reporting the parent
-                        // shell (cmd.exe) as exited when a child TUI (opencode,
-                        // vim, …) shuts down — even though the shell is still
-                        // alive and ready to accept more commands. Breaking
-                        // out of the loop in that case would show a misleading
-                        // "[shell exited]" message and force the user to
-                        // restart the shell. We now rely solely on the hard
-                        // 5-second timeout above, which is long enough to
-                        // ride out ConPTY's transient exit reports but short
-                        // enough that a truly dead shell is still detected
-                        // quickly.
-
-                        std::thread::sleep(Duration::from_millis(100));
+                        // Pipe break — a child inside the PTY may have exited.
+                        // Signal the panel. Do NOT write anything to the PTY.
+                        // Do NOT assume the shell exited.
+                        let _ = redraw_tx_clone.send(());
+                        // Only stop reading if the shell itself has exited.
+                        let shell_exited = child_clone.lock()
+                            .as_mut()
+                            .and_then(|c| c.try_wait().ok())
+                            .flatten()
+                            .is_some();
+                        if shell_exited { break; }
+                        // Shell still alive — but the pipe is at EOF.  On
+                        // Windows ConPTY, subsequent reads return 0 immediately,
+                        // creating a busy-loop.  Sleep before retrying so the
+                        // DSR nudge from the event loop has time to unblock it.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                     Ok(n) => {
-                        if pipe_was_broken {
-                            // Check whether the break was long enough to indicate a real
-                            // child process exit (filtering out momentary ConPTY quirks).
-                            let break_duration = zero_start
-                                .map_or(Duration::ZERO, |t| t.elapsed());
-                            if break_duration > Duration::from_millis(200) {
-                                // Pipe recovered after a meaningful break — most likely a
-                                // child TUI process (opencode, vim, less, etc.) just exited.
-                                // Signal the panel to force-exit the alternate screen buffer
-                                // so the shell prompt becomes visible immediately.
-                                let _ = redraw_tx_clone.send(());
-                            }
-                            pipe_was_broken = false;
-                        }
-                        zero_count = 0;
-                        zero_start = None;
                         let data = buf[..n].to_vec();
-                        if tx.send(data).is_err() {
-                            break;
-                        }
+                        if tx.send(data).is_err() { break; }
                     }
                     Err(_) => {
+                        // r.read() returned an error — on Windows ConPTY this
+                        // often happens when a child TUI (opencode, vim, …)
+                        // exits, NOT because cmd.exe died.  If the shell is
+                        // still alive we must NOT break (which drops tx and
+                        // triggers Disconnected → shell-exited in the panel).
+                        // Instead, enter a polling loop that checks try_wait
+                        // periodically so tx stays open and the session lives.
+                        let shell_exited = child_clone.lock()
+                            .as_mut()
+                            .and_then(|c| c.try_wait().ok())
+                            .flatten()
+                            .is_some();
+                        if !shell_exited {
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                                let se = child_clone.lock()
+                                    .as_mut()
+                                    .and_then(|c| c.try_wait().ok())
+                                    .flatten()
+                                    .is_some();
+                                if se { break; }
+                            }
+                        }
                         break;
                     }
                 }
@@ -124,7 +115,7 @@ impl TerminalProcess {
         });
 
         Ok((TerminalProcess {
-            writer: Arc::new(Mutex::new(writer)),
+            writer: writer_arc,
             master,
             _slave: Some(pair.slave),
             child,
