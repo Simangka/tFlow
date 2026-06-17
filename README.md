@@ -26,6 +26,7 @@
 - **Fuzzy file finder** — `Ctrl+P` search and open any workspace file
 - **Command palette** — `Ctrl+Shift+P` fuzzy-find any command
 - **User config** — TOML config at `~/.config/tflow/config.toml`
+- **Word wrap** — `:wrap` to toggle, enabled by default
 - **5 themes** — retro_green (default), amber, synthwave, tokyo_night, default_dark
 - **Autosave + recovery** — Background auto-save and crash recovery files
 
@@ -168,6 +169,7 @@ Search highlighting is automatically cleared when you start editing or press `Es
 | `:vs` / `:vsplit` | Vertical split with current buffer |
 | `:vs <file>` / `:vsplit <file>` | Open file in vertical split |
 | `:close` | Close current split pane |
+| `:wrap` | Toggle word wrap on/off |
 | `:branch` / `:br` / `:branches` | Toggle branch log viewer |
 | `:help` | Show help screen |
 
@@ -242,7 +244,7 @@ tab_width = 4
 autosave = true
 cursor_blink_period_ms = 500
 scrolloff = 3
-word_wrap = false
+word_wrap = true
 history_size = 1000
 
 [markdown]

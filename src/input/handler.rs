@@ -107,6 +107,9 @@ impl InputHandler {
     }
 
     pub fn enable_bracketed_paste(&self) -> Result<(), anyhow::Error> {
+        // Bracketed paste is enabled/disabled at terminal setup time via
+        // crossterm::terminal::EnableBracketedPaste/DisableBracketedPaste.
+        // No per-handler action needed.
         Ok(())
     }
 

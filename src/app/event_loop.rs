@@ -84,103 +84,28 @@ impl EventLoop {
         loop {
             // Poll for both input and LSP events
             let event = input_handler.recv().await;
-            match event {
-                Some(InputEvent::Key(key)) => {
-                    if let Err(msg) = Self::handle_key_event(&mut ctx, key, &mut input_handler, &mut input_handle) {
-                        ctx.push_error(msg);
-                    }
-                    if ctx.editor_mode.mode == EditMode::Insert {
-                        ctx.last_keypress = std::time::Instant::now();
-                        // Don't re-trigger completion for nav/accept keys when popup is showing
-                        let skip_trigger = (ctx.show_completion
-                            && !ctx.completion_items.is_empty()
-                            && matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Tab))
-                            || (!ctx.show_completion && matches!(key.code, KeyCode::Enter | KeyCode::Tab));
-                        if !skip_trigger {
-                            ctx.completion_pending = true;
-                        }
-                    }
-                }
-                Some(InputEvent::Resize(_cols, _rows)) => {}
-                Some(InputEvent::Tick) => {
-                    Self::handle_tick(&mut ctx);
-                    // Check completion debounce
-                    if ctx.completion_pending && ctx.lsp_enabled {
-                        let elapsed = ctx.last_keypress.elapsed();
-                        if elapsed >= std::time::Duration::from_millis(80) {
-                            ctx.trigger_completion();
-                        }
-                    }
-                }
-                Some(InputEvent::Mouse(mouse)) => {
-                    // When the terminal pane is in alternate screen mode (opencode,
-                    // vim, htop, less, ...) the TUI has its own mouse handling.
-                    // Forward the event to the PTY in xterm's default mouse encoding
-                    // (CSI M Cb Cx Cy) so the TUI can scroll / click / select natively.
-                    // Without this, scrolling in opencode does nothing because we
-                    // capture the wheel at the tFlow layer and never send it through.
-                    let in_alt_screen = ctx.terminal_panel.active()
-                        .map(|inst| inst.parser.screen().alternate_screen())
-                        .unwrap_or(false);
 
-                    if in_alt_screen && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal {
-                        let cb: u8 = match mouse.kind {
-                            crossterm::event::MouseEventKind::Down(MouseButton::Left) => 0,
-                            crossterm::event::MouseEventKind::Down(MouseButton::Middle) => 1,
-                            crossterm::event::MouseEventKind::Down(MouseButton::Right) => 2,
-                            crossterm::event::MouseEventKind::Up(MouseButton::Left) => 3,
-                            crossterm::event::MouseEventKind::Up(MouseButton::Middle) => 4,
-                            crossterm::event::MouseEventKind::Up(MouseButton::Right) => 5,
-                            crossterm::event::MouseEventKind::Drag(MouseButton::Left) => 32,
-                            crossterm::event::MouseEventKind::Drag(MouseButton::Middle) => 33,
-                            crossterm::event::MouseEventKind::Drag(MouseButton::Right) => 34,
-                            crossterm::event::MouseEventKind::ScrollUp => 64,
-                            crossterm::event::MouseEventKind::ScrollDown => 65,
-                            crossterm::event::MouseEventKind::ScrollLeft => 66,
-                            crossterm::event::MouseEventKind::ScrollRight => 67,
-                            _ => 255, // unknown — skip
-                        };
-                        if cb != 255 {
-                            // xterm default encoding: 1-based col/row, each offset by 32.
-                            let cx = mouse.column.saturating_add(1).saturating_add(32);
-                            let cy = mouse.row.saturating_add(1).saturating_add(32);
-                            let mut seq = [0u8; 6];
-                            seq[0] = 0x1b; seq[1] = b'['; seq[2] = b'M';
-                            seq[3] = cb.saturating_add(32);
-                            seq[4] = (cx as u8).min(255);
-                            seq[5] = (cy as u8).min(255);
-                            ctx.terminal_panel.write_active(&seq).ok();
-                        }
-                    } else {
-                        // Normal (non-alt-screen) terminal: use the wheel for
-                        // terminal scrollback or editor viewport scroll.
-                        match mouse.kind {
-                            crossterm::event::MouseEventKind::ScrollDown => {
-                                if ctx.terminal_panel.visible {
-                                    ctx.terminal_panel.scroll_down();
-                                } else {
-                                    // Scroll the editor viewport, don't move the cursor
-                                    // (MoveDown would just step the cursor one line).
-                                    ctx.handle_action(&Action::PageDown).ok();
-                                }
-                            }
-                            crossterm::event::MouseEventKind::ScrollUp => {
-                                if ctx.terminal_panel.visible {
-                                    ctx.terminal_panel.scroll_up();
-                                } else {
-                                    ctx.handle_action(&Action::PageUp).ok();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
+            // Process all pending input events before rendering to batch
+            // rapid keystrokes (paste) into a single render cycle.
+            // We handle the first event, then drain any queued events.
+            if let Some(event) = event {
+                Self::process_input_event(&mut ctx, event, &mut input_handler, &mut input_handle);
+            }
+            while let Ok(next) = input_handler.rx.try_recv() {
+                Self::process_input_event(&mut ctx, next, &mut input_handler, &mut input_handle);
             }
 
             // Drain pending LSP events (non-blocking, batched)
             while let Ok(lsp_event) = lsp_event_rx.try_recv() {
                 Self::handle_lsp_event(&mut ctx, lsp_event);
+            }
+
+            // Check completion debounce after processing all events
+            if ctx.completion_pending && ctx.lsp_enabled {
+                let elapsed = ctx.last_keypress.elapsed();
+                if elapsed >= std::time::Duration::from_millis(80) {
+                    ctx.trigger_completion();
+                }
             }
 
             if ctx.quit_requested {
@@ -264,6 +189,9 @@ impl EventLoop {
         // sequences — which Windows Terminal happily translates to Up/Down and
         // hands to the running TUI (opencode, vim, etc.) as input history nav.
         let _ = crossterm::execute!(stdout, crossterm::event::EnableMouseCapture);
+        // Enable bracketed paste so the terminal sends pasted content as a single
+        // event instead of individual key events (which creates a typing animation).
+        let _ = crossterm::execute!(stdout, crossterm::event::EnableBracketedPaste);
         let backend = ratatui::backend::CrosstermBackend::new(stdout);
         let mut terminal = ratatui::Terminal::new(backend)?;
         terminal.hide_cursor()?;
@@ -273,6 +201,7 @@ impl EventLoop {
 
     fn restore_terminal(terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>) -> Result<(), anyhow::Error> {
         terminal.show_cursor()?;
+        let _ = crossterm::execute!(terminal.backend_mut(), crossterm::event::DisableBracketedPaste);
         crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen)?;
         crossterm::terminal::disable_raw_mode()?;
         Ok(())
@@ -766,6 +695,91 @@ impl EventLoop {
         Ok(())
     }
 
+    fn process_input_event(
+        ctx: &mut AppContext,
+        event: InputEvent,
+        input_handler: &mut InputHandler,
+        input_handle: &mut tokio::task::JoinHandle<()>,
+    ) {
+        match event {
+            InputEvent::Key(key) => {
+                if let Err(msg) = Self::handle_key_event(ctx, key, input_handler, input_handle) {
+                    ctx.push_error(msg);
+                }
+                if ctx.editor_mode.mode == EditMode::Insert {
+                    ctx.last_keypress = std::time::Instant::now();
+                    let skip_trigger = (ctx.show_completion
+                        && !ctx.completion_items.is_empty()
+                        && matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Tab))
+                        || (!ctx.show_completion && matches!(key.code, KeyCode::Enter | KeyCode::Tab));
+                    if !skip_trigger {
+                        ctx.completion_pending = true;
+                    }
+                }
+            }
+            InputEvent::Resize(_cols, _rows) => {}
+            InputEvent::Tick => {
+                Self::handle_tick(ctx);
+            }
+            InputEvent::Paste(data) => {
+                ctx.handle_paste_event(&data);
+            }
+            InputEvent::Mouse(mouse) => {
+                let in_alt_screen = ctx.terminal_panel.active()
+                    .map(|inst| inst.parser.screen().alternate_screen())
+                    .unwrap_or(false);
+
+                if in_alt_screen && ctx.layout.focused_pane == crate::ui::layout::FocusedPane::Terminal {
+                    let cb: u8 = match mouse.kind {
+                        crossterm::event::MouseEventKind::Down(MouseButton::Left) => 0,
+                        crossterm::event::MouseEventKind::Down(MouseButton::Middle) => 1,
+                        crossterm::event::MouseEventKind::Down(MouseButton::Right) => 2,
+                        crossterm::event::MouseEventKind::Up(MouseButton::Left) => 3,
+                        crossterm::event::MouseEventKind::Up(MouseButton::Middle) => 4,
+                        crossterm::event::MouseEventKind::Up(MouseButton::Right) => 5,
+                        crossterm::event::MouseEventKind::Drag(MouseButton::Left) => 32,
+                        crossterm::event::MouseEventKind::Drag(MouseButton::Middle) => 33,
+                        crossterm::event::MouseEventKind::Drag(MouseButton::Right) => 34,
+                        crossterm::event::MouseEventKind::ScrollUp => 64,
+                        crossterm::event::MouseEventKind::ScrollDown => 65,
+                        crossterm::event::MouseEventKind::ScrollLeft => 66,
+                        crossterm::event::MouseEventKind::ScrollRight => 67,
+                        _ => 255,
+                    };
+                    if cb != 255 {
+                        let cx = mouse.column.saturating_add(1).saturating_add(32);
+                        let cy = mouse.row.saturating_add(1).saturating_add(32);
+                        let mut seq = [0u8; 6];
+                        seq[0] = 0x1b; seq[1] = b'['; seq[2] = b'M';
+                        seq[3] = cb.saturating_add(32);
+                        seq[4] = (cx as u8).min(255);
+                        seq[5] = (cy as u8).min(255);
+                        ctx.terminal_panel.write_active(&seq).ok();
+                    }
+                } else {
+                    match mouse.kind {
+                        crossterm::event::MouseEventKind::ScrollDown => {
+                            if ctx.terminal_panel.visible {
+                                ctx.terminal_panel.scroll_down();
+                            } else {
+                                ctx.handle_action(&Action::PageDown).ok();
+                            }
+                        }
+                        crossterm::event::MouseEventKind::ScrollUp => {
+                            if ctx.terminal_panel.visible {
+                                ctx.terminal_panel.scroll_up();
+                            } else {
+                                ctx.handle_action(&Action::PageUp).ok();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            InputEvent::FocusGained | InputEvent::FocusLost => {}
+        }
+    }
+
     fn handle_tick(ctx: &mut AppContext) {
         ctx.tick();
         if ctx.terminal_panel.visible {
@@ -825,6 +839,7 @@ impl EventLoop {
                 }
 
                 ctx.render_engine.set_viewport(content_height, content_width);
+                ctx.render_engine.word_wrap = ctx.config.editor.word_wrap;
                 ctx.render_engine.scroll_offset = pane_scroll;
 
                 if editor_is_split {
@@ -881,13 +896,23 @@ impl EventLoop {
                             crate::rendering::blame_gutter::compute_width(bd)
                         } else { 0 }
                     } else { 0 };
+                    let text_area_width = content_rect.width.saturating_sub(gutter_w + blame_w);
+                    let (vis_cursor_line, vis_cursor_col) = if ctx.config.editor.word_wrap {
+                        let vpos = ctx.render_engine.logical_to_visual(
+                            buf,
+                            Position::new(cursor_line, cursor_col),
+                            text_area_width as usize,
+                        );
+                        (vpos.line, vpos.column)
+                    } else {
+                        (cursor_line, cursor_col)
+                    };
                     let scroll_line = pane_scroll.line;
-                    let visual_line = cursor_line.wrapping_sub(scroll_line);
+                    let visual_line = vis_cursor_line.wrapping_sub(scroll_line);
                     if visual_line < content_height {
-                        let text_x = gutter_w + blame_w + cursor_col as u16;
+                        let text_x = gutter_w + blame_w + vis_cursor_col as u16;
                         let y = content_rect.y + visual_line as u16;
-                        let text_area_width = content_rect.width.saturating_sub(gutter_w + blame_w);
-                        if (cursor_col as u16) < text_area_width {
+                        if (vis_cursor_col as u16) < text_area_width {
                             frame.set_cursor_position(ratatui::layout::Position::new(content_rect.x + text_x, y));
                         }
                     }

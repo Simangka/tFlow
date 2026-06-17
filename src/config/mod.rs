@@ -21,7 +21,7 @@ impl Default for EditorConfig {
         Self {
             tab_size: 4,
             scrolloff: 3,
-            word_wrap: false,
+            word_wrap: true,
             syntax_highlighting: true,
             cursor_style: "block".to_string(),
             show_tabs: false,

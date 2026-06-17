@@ -359,13 +359,27 @@ impl AppContext {
         };
         let scrolloff = self.config.editor.scrolloff.min(vh / 2);
         if vh > 0 {
-            let max_scroll = line_count.saturating_sub(vh);
             let cur_scroll = self.render_engine.scroll_offset.line;
-            if clamped.line < cur_scroll + scrolloff && cur_scroll > 0 {
-                self.render_engine.scroll_offset.line = clamped.line.saturating_sub(scrolloff);
-            } else if clamped.line >= cur_scroll + vh.saturating_sub(scrolloff) {
-                let target = clamped.line + 1 + scrolloff - vh;
-                self.render_engine.scroll_offset.line = target.min(max_scroll);
+            let vw = self.render_engine.viewport_width.saturating_sub(2).max(2);
+            if self.config.editor.word_wrap {
+                let buf = self.active_buffer();
+                let total = self.render_engine.total_visual_lines(&buf, vw);
+                let max_scroll = total.saturating_sub(vh);
+                let vpos = self.render_engine.logical_to_visual(&buf, clamped, vw);
+                if vpos.line < cur_scroll + scrolloff && cur_scroll > 0 {
+                    self.render_engine.scroll_offset.line = vpos.line.saturating_sub(scrolloff);
+                } else if vpos.line >= cur_scroll + vh.saturating_sub(scrolloff) {
+                    let target = vpos.line + 1 + scrolloff - vh;
+                    self.render_engine.scroll_offset.line = target.min(max_scroll);
+                }
+            } else {
+                let max_scroll = line_count.saturating_sub(vh);
+                if clamped.line < cur_scroll + scrolloff && cur_scroll > 0 {
+                    self.render_engine.scroll_offset.line = clamped.line.saturating_sub(scrolloff);
+                } else if clamped.line >= cur_scroll + vh.saturating_sub(scrolloff) {
+                    let target = clamped.line + 1 + scrolloff - vh;
+                    self.render_engine.scroll_offset.line = target.min(max_scroll);
+                }
             }
         }
     }
@@ -798,12 +812,42 @@ impl AppContext {
             }
             Action::Paste => {
                 if let Some(text) = self.get_clipboard_text() {
+                    let cleaned = Self::normalize_line_endings(&text);
+                    if !self.editor_mode.is_insert() {
+                        self.update_mode(EditMode::Insert);
+                    }
+                    if self.selection.is_active && !self.selection.is_empty() {
+                        if let Some(range) = self.selection.normalized_range() {
+                            let buf = self.buffers.get_mut(self.active_buffer).ok_or("No active buffer")?;
+                            buf.delete_range(range);
+                            self.cursor.position = range.start;
+                            self.cursor.preferred_column = range.start.column;
+                        }
+                        self.selection.clear();
+                    }
                     let buf = self.buffers.get_mut(self.active_buffer).ok_or("No active buffer")?;
-                    let cursor = &mut self.cursor;
-                    buf.insert_str(cursor.position, &text);
-                    cursor.position = Position::new(cursor.position.line, cursor.position.column + text.len());
-                    cursor.preferred_column = cursor.position.column;
+                    let pos = self.cursor.position;
+                    buf.insert_str(pos, &cleaned);
+                    let newlines = cleaned.chars().filter(|&c| c == '\n').count();
+                    let new_pos = if newlines == 0 {
+                        Position::new(pos.line, pos.column + cleaned.chars().count())
+                    } else {
+                        Position::new(pos.line + newlines, cleaned.split('\n').last().unwrap_or("").chars().count())
+                    };
+                    self.cursor.position = new_pos;
+                    self.cursor.preferred_column = new_pos.column;
                     buf.set_modified();
+                    if let Some(history) = self.histories.get_mut(self.active_buffer) {
+                        history.push(HistoryEntry {
+                            changes: vec![ChangeKind::Insert {
+                                pos,
+                                text: cleaned,
+                            }],
+                            timestamp: std::time::Instant::now(),
+                            cursor_before: pos,
+                            cursor_after: new_pos,
+                        });
+                    }
                 }
             }
             Action::CopyLine => {
@@ -1262,6 +1306,10 @@ impl AppContext {
                             self.handle_action(&Action::ToggleTerminal).ok();
                         }
                     }
+                    "wrap" => {
+                        self.config.editor.word_wrap = !self.config.editor.word_wrap;
+                        self.push_info(if self.config.editor.word_wrap { "Word wrap: ON" } else { "Word wrap: OFF" });
+                    }
                     "help" => {
                         self.push_info("tflow: :w save, :w <file> save as, :q quit, :e <file> open, :sp/:vs split, :new/:vnew buffer, :blame, :status, :branch, :terminal, Ctrl+P find file, :help help");
                     }
@@ -1579,6 +1627,82 @@ impl AppContext {
             text,
             version: 1,
         });
+    }
+
+    fn normalize_line_endings(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    result.push('\n');
+                    chars.next();
+                } else {
+                    result.push('\n');
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    pub fn handle_paste_event(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let cleaned = Self::normalize_line_endings(text);
+
+        // Switch to insert mode so the paste feels like typing
+        if !self.editor_mode.is_insert() {
+            self.update_mode(EditMode::Insert);
+        }
+
+        // Delete active selection first, mirroring standard editor behavior
+        if self.selection.is_active && !self.selection.is_empty() {
+            if let Some(range) = self.selection.normalized_range() {
+                if let Some(buf) = self.buffers.get_mut(self.active_buffer) {
+                    let deleted = buf.delete_range(range);
+                    self.cursor.position = range.start;
+                    self.cursor.preferred_column = range.start.column;
+                    let _ = deleted;
+                }
+            }
+            self.selection.clear();
+        }
+
+        let cursor_before = self.cursor.position;
+        let buf = match self.buffers.get_mut(self.active_buffer) {
+            Some(b) => b,
+            None => return,
+        };
+        buf.insert_str(cursor_before, &cleaned);
+
+        // Compute new cursor position accounting for multi-line paste
+        let char_count = cleaned.chars().count();
+        let newlines = cleaned.chars().filter(|&c| c == '\n').count();
+        let new_pos = if newlines == 0 {
+            Position::new(cursor_before.line, cursor_before.column + char_count)
+        } else {
+            let last_line_len = cleaned.split('\n').last().unwrap_or("").chars().count();
+            Position::new(cursor_before.line + newlines, last_line_len)
+        };
+
+        self.cursor.position = new_pos;
+        self.cursor.preferred_column = new_pos.column;
+        buf.set_modified();
+
+        if let Some(history) = self.histories.get_mut(self.active_buffer) {
+            history.push(HistoryEntry {
+                changes: vec![ChangeKind::Insert {
+                    pos: cursor_before,
+                    text: cleaned,
+                }],
+                timestamp: std::time::Instant::now(),
+                cursor_before,
+                cursor_after: new_pos,
+            });
+        }
     }
 
     pub fn trigger_completion(&mut self) {

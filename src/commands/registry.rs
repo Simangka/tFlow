@@ -778,14 +778,37 @@ impl CommandRegistry {
             Action::Paste => {
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
                     if let Ok(text) = clipboard.get_text() {
+                        let cleaned: String = {
+                            let mut result = String::with_capacity(text.len());
+                            let mut chars = text.chars().peekable();
+                            while let Some(c) = chars.next() {
+                                if c == '\r' {
+                                    if chars.peek() == Some(&'\n') {
+                                        result.push('\n');
+                                        chars.next();
+                                    } else {
+                                        result.push('\n');
+                                    }
+                                } else {
+                                    result.push(c);
+                                }
+                            }
+                            result
+                        };
+                        if !ctx.editor_mode.is_insert() {
+                            ctx.editor_mode.switch_to_insert();
+                        }
                         let buf = ctx.buffers.get_mut(ctx.active_buffer).ok_or("No active buffer")?;
                         let pos = buf.cursor;
-                        buf.insert_str(pos, &text);
-                        buf.cursor = crate::core::Position::new(
-                            pos.line,
-                            pos.column + text.len(),
-                        );
-                        ctx.cursor.position = buf.cursor;
+                        buf.insert_str(pos, &cleaned);
+                        let newlines = cleaned.chars().filter(|&c| c == '\n').count();
+                        let new_pos = if newlines == 0 {
+                            crate::core::Position::new(pos.line, pos.column + cleaned.chars().count())
+                        } else {
+                            crate::core::Position::new(pos.line + newlines, cleaned.split('\n').last().unwrap_or("").chars().count())
+                        };
+                        buf.cursor = new_pos;
+                        ctx.cursor.position = new_pos;
                         buf.set_modified();
                     }
                 }
