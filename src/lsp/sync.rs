@@ -111,7 +111,7 @@ impl DocumentSyncState {
 }
 
 pub fn build_text_content_change(
-    old_text: &str,
+    _old_text: &str,
     new_text: &str,
     range: lsp_types::Range,
 ) -> TextDocumentContentChangeEvent {

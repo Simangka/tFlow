@@ -38,6 +38,11 @@ pub struct TerminalInstance {
     /// of forwarding it to the shell — preventing the double-prompt that would
     /// otherwise appear when the unblocking Enter executes an empty command.
     pub pending_after_pipe_break: Option<Instant>,
+    /// Maximum number of output chunks to process per drain call. Capping this
+    /// prevents TUIs that print a brief menu/banner before entering the alternate
+    /// screen (e.g. opencode's session picker) from flashing by invisibly — the
+    /// renderer gets to paint the intermediate parser state between drain calls.
+    pub max_chunks_per_drain: usize,
 }
 
 impl TerminalInstance {
@@ -53,6 +58,7 @@ impl TerminalInstance {
             shell: shell.to_string(),
             state: TerminalState::Running,
             pending_after_pipe_break: None,
+            max_chunks_per_drain: 50,
         })
     }
 
@@ -68,10 +74,11 @@ impl TerminalInstance {
         self.state = TerminalState::Running;
         self.scroll_offset = 0;
         self.pending_after_pipe_break = None;
+        self.max_chunks_per_drain = 50;
         Ok(())
     }
 
-    pub fn drain_output(&mut self) {
+    pub fn drain_output(&mut self) -> bool {
         // Handle redraw notifications from the reader thread. These fire when the
         // ConPTY pipe was broken for a meaningful duration and then recovered — a
         // strong signal that a child TUI process (opencode, vim, less, htop, ...)
@@ -96,19 +103,21 @@ impl TerminalInstance {
             self.pending_after_pipe_break = Some(Instant::now());
         }
 
-        // Process at most a few chunks per drain so the renderer sees each
-        // intermediate parser state. A normal terminal emulator paints after
-        // every batch of bytes it receives; if we drain everything in one shot
-        // the user only ever sees the final state, which means TUIs that print
-        // a brief menu/banner before entering the alternate screen (opencode's
-        // session picker, for example) flash by invisibly. Capping to ~3 chunks
-        // per drain means the menu survives long enough on screen to be read.
-        const MAX_CHUNKS_PER_DRAIN: usize = 3;
+        // Process at most `max_chunks_per_drain` chunks per drain so the
+        // renderer sees each intermediate parser state. A normal terminal
+        // emulator paints after every batch of bytes it receives; if we drain
+        // everything in one shot the user only ever sees the final state, which
+        // means TUIs that print a brief menu/banner before entering the
+        // alternate screen (opencode's session picker, for example) flash by
+        // invisibly. Capping the chunks per drain means the menu survives long
+        // enough on screen to be read. The limit is configurable per instance
+        // via `max_chunks_per_drain`.
+        let max_chunks = self.max_chunks_per_drain;
         let mut chunks_processed: usize = 0;
 
         loop {
-            if chunks_processed >= MAX_CHUNKS_PER_DRAIN {
-                break;
+            if chunks_processed >= max_chunks {
+                return true; // more data remains in the channel
             }
             match self.rx.try_recv() {
                 Ok(bytes) => {
@@ -117,7 +126,7 @@ impl TerminalInstance {
                         chunks_processed += 1;
                     }
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return false,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     if matches!(self.state, TerminalState::Running) {
                         self.state = TerminalState::Exited("[shell exited — press Enter to restart]".to_string());
@@ -136,23 +145,10 @@ impl TerminalInstance {
                         }
                         self.reset_scroll();
                     }
-                    break;
+                    return false;
                 }
             }
         }
-
-        // NOTE: an earlier draft had an idle-timeout fallback here that
-        // force-exited the alt screen after ~600ms of silence. That turned out
-        // to be far too aggressive: an active TUI waiting for user input
-        // (opencode, vim, htop, …) is silent for many seconds at a time, and
-        // the force-exit would interrupt it, the TUI would immediately
-        // re-enter alt screen, and we'd loop — producing a jumbled
-        // main-screen / alt-screen flicker for the user.
-        //
-        // The right signal for "TUI has exited" is the pipe-break redraw
-        // notification above (drained at the top of this function) and the
-        // Disconnected branch in the rx loop. If the child exits cleanly
-        // without breaking the pipe the user can press any key to nudge it.
     }
 
     pub fn is_running(&self) -> bool {
@@ -195,6 +191,10 @@ pub struct TerminalPanel {
     pub position: TerminalPosition,
     pub height: u16,
     pub width: u16,
+    /// Default maximum chunks per drain for new terminal instances. A higher
+    /// value processes more output per tick while still leaving the renderer
+    /// enough intermediate states to show brief TUIs (menus, banners, etc.).
+    pub max_chunks_per_drain: usize,
 }
 
 impl TerminalPanel {
@@ -207,6 +207,7 @@ impl TerminalPanel {
             position: TerminalPosition::Right,
             height: 12,
             width: 100,
+            max_chunks_per_drain: 50,
         }
     }
 
@@ -290,10 +291,14 @@ impl TerminalPanel {
         }
     }
 
-    pub fn drain_all(&mut self) {
+    pub fn drain_all(&mut self) -> bool {
+        let mut has_more = false;
         for inst in &mut self.instances {
-            inst.drain_output();
+            if inst.drain_output() {
+                has_more = true;
+            }
         }
+        has_more
     }
 
     pub fn reset_scroll(&mut self) {

@@ -97,6 +97,7 @@ impl Default for TerminalConfig {
     }
 }
 
+/// Persistent configuration loaded from the TOML config file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub theme: String,
@@ -106,14 +107,7 @@ pub struct Config {
     pub keymap: KeymapConfig,
     pub markdown: MarkdownConfig,
     pub terminal: TerminalConfig,
-    pub readonly: bool,
-    pub verbose: bool,
-    pub log_file: Option<PathBuf>,
-    pub files: Vec<String>,
-    pub command: Option<String>,
-    pub position: Option<String>,
     pub clipboard_provider: String,
-    pub no_line_numbers: bool,
 }
 
 impl Default for Config {
@@ -126,14 +120,7 @@ impl Default for Config {
             keymap: KeymapConfig::default(),
             markdown: MarkdownConfig::default(),
             terminal: TerminalConfig::default(),
-            readonly: false,
-            verbose: false,
-            log_file: None,
-            files: Vec::new(),
-            command: None,
-            position: None,
             clipboard_provider: "system".to_string(),
-            no_line_numbers: false,
         }
     }
 }
@@ -153,13 +140,13 @@ impl Config {
         &mut self,
         theme: Option<&str>,
         no_line_numbers: bool,
-        verbose: bool,
-        log_file: Option<&std::path::Path>,
-        command: Option<&str>,
+        _verbose: bool,
+        _log_file: Option<&std::path::Path>,
+        _command: Option<&str>,
         workspace: Option<&std::path::Path>,
-        position: Option<&str>,
-        readonly: bool,
-        files: &[String],
+        _position: Option<&str>,
+        _readonly: bool,
+        _files: &[String],
     ) {
         if let Some(t) = theme {
             self.theme = t.to_string();
@@ -167,24 +154,20 @@ impl Config {
         if no_line_numbers {
             self.line_numbers.show = false;
         }
-        self.verbose |= verbose;
-        if let Some(lf) = log_file {
-            self.log_file = Some(lf.to_path_buf());
-        }
-        if let Some(cmd) = command {
-            self.command = Some(cmd.to_string());
-        }
         if let Some(ws) = workspace {
             self.workspace.root_path = Some(ws.to_path_buf());
         }
-        if let Some(pos) = position {
-            self.position = Some(pos.to_string());
-        }
-        if readonly {
-            self.readonly = true;
-        }
-        if !files.is_empty() {
-            self.files = files.to_vec();
-        }
     }
+}
+
+/// CLI-specific options that are NOT persisted in the config file.
+#[derive(Debug, Clone)]
+pub struct CliOptions {
+    pub readonly: bool,
+    pub verbose: bool,
+    pub log_file: Option<PathBuf>,
+    pub files: Vec<String>,
+    pub command: Option<String>,
+    pub position: Option<String>,
+    pub no_line_numbers: bool,
 }

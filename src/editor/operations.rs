@@ -8,6 +8,11 @@ pub struct EditOperations;
 
 impl EditOperations {
     pub fn insert_char(buffer: &mut Buffer, cursor: &mut Cursor, c: char) -> Result<ChangeKind, ()> {
+        let line_len = buffer.chars_at_line(cursor.position.line);
+        if cursor.position.column > line_len {
+            cursor.position.column = line_len;
+            cursor.preferred_column = line_len;
+        }
         let pos = cursor.position;
         buffer.insert_char(pos, c);
         if c == '\n' {
@@ -24,6 +29,11 @@ impl EditOperations {
     }
 
     pub fn insert_newline(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<ChangeKind, ()> {
+        let line_len = buffer.chars_at_line(cursor.position.line);
+        if cursor.position.column > line_len {
+            cursor.position.column = line_len;
+            cursor.preferred_column = line_len;
+        }
         let pos = cursor.position;
         buffer.insert_newline(pos);
         cursor.position = Position::new(pos.line + 1, 0);
@@ -165,13 +175,16 @@ impl EditOperations {
         })
     }
 
-    pub fn move_line_up(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<(), ()> {
+    pub fn move_line_up(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<ChangeKind, ()> {
         let line = cursor.position.line;
         if line == 0 {
             return Err(());
         }
         let line_text = buffer.get_line(line);
         let above_text = buffer.get_line(line - 1);
+
+        let old = format!("{}\n{}", above_text, line_text);
+
         let line_range = Range::new(
             Position::new(line, 0),
             Position::new(line, buffer.chars_at_line(line)),
@@ -188,16 +201,26 @@ impl EditOperations {
         buffer.insert_str(insert_below, &format!("{}\n", above_text));
         buffer.set_modified();
         cursor.position.line = line - 1;
-        Ok(())
+
+        let new = format!("{}\n{}", buffer.get_line(line - 1), buffer.get_line(line));
+        let range = Range::new(
+            Position::new(line - 1, 0),
+            Position::new(line, buffer.chars_at_line(line)),
+        );
+
+        Ok(ChangeKind::Replace { range, old, new })
     }
 
-    pub fn move_line_down(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<(), ()> {
+    pub fn move_line_down(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<ChangeKind, ()> {
         let line = cursor.position.line;
         if line + 1 >= buffer.line_count() {
             return Err(());
         }
         let line_text = buffer.get_line(line);
         let below_text = buffer.get_line(line + 1);
+
+        let old = format!("{}\n{}", line_text, below_text);
+
         let line_range = Range::new(
             Position::new(line, 0),
             Position::new(line, buffer.chars_at_line(line)),
@@ -214,7 +237,14 @@ impl EditOperations {
         buffer.insert_str(insert_pos2, &format!("{}\n", line_text));
         buffer.set_modified();
         cursor.position.line = line + 1;
-        Ok(())
+
+        let new = format!("{}\n{}", buffer.get_line(line), buffer.get_line(line + 1));
+        let range = Range::new(
+            Position::new(line, 0),
+            Position::new(line + 1, buffer.chars_at_line(line + 1)),
+        );
+
+        Ok(ChangeKind::Replace { range, old, new })
     }
 
     pub fn join_lines(buffer: &mut Buffer, cursor: &mut Cursor) -> Result<ChangeKind, ()> {

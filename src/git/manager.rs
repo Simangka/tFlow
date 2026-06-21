@@ -9,6 +9,7 @@ pub struct GitManager {
     blames: HashMap<PathBuf, Vec<BlameInfo>>,
     statuses: HashMap<PathBuf, RepoStatus>,
     branches: HashMap<PathBuf, String>,
+    repo_cache: HashMap<PathBuf, PathBuf>,
 }
 
 impl GitManager {
@@ -18,16 +19,26 @@ impl GitManager {
             blames: HashMap::new(),
             statuses: HashMap::new(),
             branches: HashMap::new(),
+            repo_cache: HashMap::new(),
         }
     }
 
     pub fn discover_repo(&mut self, file_path: &Path) -> Option<PathBuf> {
-        let file_path = if file_path.is_relative() {
+        let resolved = if file_path.is_relative() {
             std::env::current_dir().ok()?.join(file_path)
         } else {
             file_path.to_path_buf()
         };
-        let mut dir = file_path.parent()?.to_path_buf();
+
+        // Check cache first
+        if let Some(cached) = self.repo_cache.get(&resolved) {
+            if !cached.as_os_str().is_empty() {
+                return Some(cached.clone());
+            }
+            return None;
+        }
+
+        let mut dir = resolved.parent()?.to_path_buf();
         loop {
             let git_dir = dir.join(".git");
             if git_dir.exists() {
@@ -41,12 +52,14 @@ impl GitManager {
                         self.branches.insert(repo_path.clone(), branch);
                     }
                 }
+                self.repo_cache.insert(resolved, repo_path.clone());
                 return Some(repo_path);
             }
             if !dir.pop() {
                 break;
             }
         }
+        self.repo_cache.insert(resolved, PathBuf::new());
         None
     }
 

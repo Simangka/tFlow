@@ -145,7 +145,7 @@ impl CommandPalette {
     pub fn set_commands(&mut self, registry: &CommandRegistry, keymap: &KeyMap) {
         self.items.clear();
         for cmd in registry.all_commands() {
-            let action = cmd.action.clone().unwrap_or(Action::NoOp);
+            let action = cmd.action.clone().unwrap_or(Action::Noop);
             let cat = action.category();
             let keys = keymap.describe_binding(&action);
             self.items.push(PaletteItem {

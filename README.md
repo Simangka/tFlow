@@ -45,7 +45,13 @@ cp target/release/tflow ~/.local/bin/
 copy target\release\tflow.exe %USERPROFILE%\.cargo\bin\tflow.exe
 ```
 
-Or run directly:
+Or install globally via cargo:
+
+```bash
+cargo install --path .
+```
+
+Or run directly without installing:
 
 ```bash
 cargo run -- notes.md
@@ -60,7 +66,7 @@ cargo run -- notes.md
 
 ## Usage
 
-### Opening files
+### Opening & creating files
 
 ```bash
 tflow notes.md              # open a file
@@ -68,6 +74,16 @@ tflow a.md b.txt            # open multiple files
 tflow .                     # open current directory as workspace
 tflow notes.md:120          # open at line 120
 cat notes.md | tflow        # pipe from stdin
+```
+
+### Creating files and directories from CLI
+
+```bash
+tflow -w app.txt            # create a single empty file
+tflow -w main.py utils.js   # create multiple files
+tflow -d src                # create a directory
+tflow -d src lib            # create multiple directories
+tflow -w app.txt -d src     # mix files and directories
 ```
 
 ### Modes

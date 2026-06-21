@@ -7,24 +7,14 @@ pub enum Action {
     MoveDown,
     WordForward,
     WordBackward,
-    MoveWordForward,
-    MoveWordBackward,
     StartOfLine,
     EndOfLine,
-    MoveToStartOfLine,
-    MoveToEndOfLine,
     StartOfFile,
     EndOfFile,
-    MoveToStartOfFile,
-    MoveToEndOfFile,
     PageUp,
     PageDown,
-    MovePageUp,
-    MovePageDown,
     HalfPageUp,
     HalfPageDown,
-    MoveHalfPageUp,
-    MoveHalfPageDown,
     MoveToMatchingBrace,
     SmartGotoLine(usize),
     SmartGotoDefinition,
@@ -34,8 +24,6 @@ pub enum Action {
     InsertTab,
     DeleteBackward,
     DeleteForward,
-    DeleteCharForward,
-    DeleteCharBackward,
     DeleteWordForward,
     DeleteWordBackward,
     DeleteLine,
@@ -43,8 +31,6 @@ pub enum Action {
     JoinLines,
     Indent,
     Unindent,
-    IndentLine,
-    UnindentLine,
     DuplicateLine,
     MoveLineUp,
     MoveLineDown,
@@ -76,13 +62,10 @@ pub enum Action {
     OpenFileAt(String),
     SaveFile,
     SaveAs,
-    SaveFileAs,
     CloseFile,
-    CloseBuffer,
     ReloadFile,
     NewFile,
     GoToLine(Option<usize>),
-    JumpToLine,
     FuzzyFindFile,
     FindSymbol,
     FindHeading,
@@ -96,21 +79,15 @@ pub enum Action {
     ReplaceAll,
     SearchForward,
     SearchBackward,
-    SearchNext,
-    SearchPrevious,
-    SearchReplace,
-    SearchReplaceAll,
     SearchToggleRegex,
     SearchToggleCaseSensitive,
 
     SwitchBuffer(usize),
-    GoToBuffer(usize),
     NextBuffer,
     PreviousBuffer,
     SplitHorizontal,
     SplitVertical,
     ClosePane,
-    CloseSplit,
     NextSplit,
     PreviousSplit,
 
@@ -130,7 +107,6 @@ pub enum Action {
     ToggleLineNumbers,
     ToggleRelativeLineNumbers,
     ToggleWordWrap,
-    ToggleWrap,
     ToggleSyntaxHighlighting,
     ToggleStatusBar,
     ToggleTabBar,
@@ -138,7 +114,6 @@ pub enum Action {
     ToggleLogPanel,
 
     ShowPalette,
-    ShowCommandPalette,
     ShowNotifications,
     IncreaseScrolloff,
     DecreaseScrolloff,
@@ -151,7 +126,6 @@ pub enum Action {
     MacroStart,
     MacroEnd,
     MacroPlay,
-    PlaybackMacro,
 
     ExecuteCommand(String),
 
@@ -162,8 +136,6 @@ pub enum Action {
     ReloadConfig,
 
     MoveToLine(usize),
-    SearchForwardRegex,
-    SearchBackwardRegex,
 
     GitBlameToggle,
     GitStatus,
@@ -187,7 +159,6 @@ pub enum Action {
     TerminalCyclePosition,
 
     Noop,
-    NoOp,
 }
 
 impl Action {
@@ -197,31 +168,31 @@ impl Action {
             Action::MoveRight => "Move cursor right",
             Action::MoveUp => "Move cursor up",
             Action::MoveDown => "Move cursor down",
-            Action::WordForward | Action::MoveWordForward => "Move cursor word forward",
-            Action::WordBackward | Action::MoveWordBackward => "Move cursor word backward",
-            Action::StartOfLine | Action::MoveToStartOfLine => "Move to start of line",
-            Action::EndOfLine | Action::MoveToEndOfLine => "Move to end of line",
-            Action::StartOfFile | Action::MoveToStartOfFile => "Move to start of file",
-            Action::EndOfFile | Action::MoveToEndOfFile => "Move to end of file",
-            Action::PageUp | Action::MovePageUp => "Move one page up",
-            Action::PageDown | Action::MovePageDown => "Move one page down",
-            Action::HalfPageUp | Action::MoveHalfPageUp => "Move half page up",
-            Action::HalfPageDown | Action::MoveHalfPageDown => "Move half page down",
+            Action::WordForward => "Move cursor word forward",
+            Action::WordBackward => "Move cursor word backward",
+            Action::StartOfLine => "Move to start of line",
+            Action::EndOfLine => "Move to end of line",
+            Action::StartOfFile => "Move to start of file",
+            Action::EndOfFile => "Move to end of file",
+            Action::PageUp => "Move one page up",
+            Action::PageDown => "Move one page down",
+            Action::HalfPageUp => "Move half page up",
+            Action::HalfPageDown => "Move half page down",
             Action::MoveToMatchingBrace => "Move to matching brace",
             Action::SmartGotoLine(_) => "Smart goto line",
             Action::SmartGotoDefinition => "Smart goto definition",
             Action::InsertChar(_) => "Insert character",
             Action::InsertNewline => "Insert newline",
             Action::InsertTab => "Insert tab",
-            Action::DeleteBackward | Action::DeleteCharBackward => "Delete character backward",
-            Action::DeleteForward | Action::DeleteCharForward => "Delete character forward",
+            Action::DeleteBackward => "Delete character backward",
+            Action::DeleteForward => "Delete character forward",
             Action::DeleteWordForward => "Delete word forward",
             Action::DeleteWordBackward => "Delete word backward",
             Action::DeleteLine => "Delete line",
             Action::DeleteToEndOfLine => "Delete to end of line",
             Action::JoinLines => "Join lines",
-            Action::Indent | Action::IndentLine => "Indent line",
-            Action::Unindent | Action::UnindentLine => "Unindent line",
+            Action::Indent => "Indent line",
+            Action::Unindent => "Unindent line",
             Action::DuplicateLine => "Duplicate line",
             Action::MoveLineUp => "Move line up",
             Action::MoveLineDown => "Move line down",
@@ -247,12 +218,11 @@ impl Action {
             Action::OpenFile => "Open file",
             Action::OpenFileAt(_) => "Open file at path",
             Action::SaveFile => "Save file",
-            Action::SaveAs | Action::SaveFileAs => "Save file as",
+            Action::SaveAs => "Save file as",
             Action::CloseFile => "Close file",
-            Action::CloseBuffer => "Close buffer",
             Action::ReloadFile => "Reload file",
             Action::NewFile => "New file",
-            Action::GoToLine(..) | Action::JumpToLine => "Jump to line",
+            Action::GoToLine(..) => "Jump to line",
             Action::FuzzyFindFile => "Fuzzy find file",
             Action::FindSymbol => "Find symbol in document",
             Action::FindHeading => "Find heading in document",
@@ -265,21 +235,14 @@ impl Action {
             Action::ReplaceAll => "Search and replace all",
             Action::SearchForward => "Search forward",
             Action::SearchBackward => "Search backward",
-            Action::SearchNext => "Next search match",
-            Action::SearchPrevious => "Previous search match",
-            Action::SearchReplace => "Search and replace",
-            Action::SearchReplaceAll => "Search and replace all",
             Action::SearchToggleRegex => "Toggle regex search",
             Action::SearchToggleCaseSensitive => "Toggle case sensitive search",
-            Action::SearchForwardRegex => "Search forward with regex",
-            Action::SearchBackwardRegex => "Search backward with regex",
             Action::SwitchBuffer(_) => "Switch to buffer",
-            Action::GoToBuffer(_) => "Go to buffer",
             Action::NextBuffer => "Next buffer",
             Action::PreviousBuffer => "Previous buffer",
             Action::SplitHorizontal => "Split horizontally",
             Action::SplitVertical => "Split vertically",
-            Action::ClosePane | Action::CloseSplit => "Close split pane",
+            Action::ClosePane => "Close split pane",
             Action::NextSplit => "Next split",
             Action::PreviousSplit => "Previous split",
             Action::FocusPaneLeft => "Focus left pane",
@@ -296,13 +259,13 @@ impl Action {
             Action::ToggleSideBySide => "Toggle side by side preview",
             Action::ToggleLineNumbers => "Toggle line numbers",
             Action::ToggleRelativeLineNumbers => "Toggle relative line numbers",
-            Action::ToggleWordWrap | Action::ToggleWrap => "Toggle word wrap",
+            Action::ToggleWordWrap => "Toggle word wrap",
             Action::ToggleSyntaxHighlighting => "Toggle syntax highlighting",
             Action::ToggleStatusBar => "Toggle status bar",
             Action::ToggleTabBar => "Toggle tab bar",
             Action::ToggleMinimap => "Toggle minimap",
             Action::ToggleLogPanel => "Toggle log panel",
-            Action::ShowPalette | Action::ShowCommandPalette => "Show command palette",
+            Action::ShowPalette => "Show command palette",
             Action::ShowNotifications => "Show notifications",
             Action::IncreaseScrolloff => "Increase scroll offset",
             Action::DecreaseScrolloff => "Decrease scroll offset",
@@ -313,7 +276,7 @@ impl Action {
             Action::RepeatLastAction => "Repeat last action",
             Action::MacroStart => "Start macro recording",
             Action::MacroEnd => "End macro recording",
-            Action::MacroPlay | Action::PlaybackMacro => "Play recorded macro",
+            Action::MacroPlay => "Play recorded macro",
             Action::ExecuteCommand(_) => "Execute command",
             Action::Quit => "Quit editor",
             Action::ForceQuit => "Force quit without saving",
@@ -340,7 +303,7 @@ impl Action {
             Action::TerminalScrollUp => "Scroll terminal up",
             Action::TerminalScrollDown => "Scroll terminal down",
             Action::TerminalCyclePosition => "Cycle terminal position",
-            Action::Noop | Action::NoOp => "No operation",
+            Action::Noop => "No operation",
         }
     }
 
@@ -348,29 +311,23 @@ impl Action {
         match self {
             Action::MoveLeft | Action::MoveRight | Action::MoveUp | Action::MoveDown
             | Action::WordForward | Action::WordBackward
-            | Action::MoveWordForward | Action::MoveWordBackward
             | Action::StartOfLine | Action::EndOfLine
-            | Action::MoveToStartOfLine | Action::MoveToEndOfLine
             | Action::StartOfFile | Action::EndOfFile
-            | Action::MoveToStartOfFile | Action::MoveToEndOfFile
             | Action::PageUp | Action::PageDown
-            | Action::MovePageUp | Action::MovePageDown
             | Action::HalfPageUp | Action::HalfPageDown
-            | Action::MoveHalfPageUp | Action::MoveHalfPageDown
             | Action::MoveToMatchingBrace | Action::ScrollUp | Action::ScrollDown
             | Action::SmartGotoLine(..) | Action::SmartGotoDefinition => ActionCategory::Movement,
 
             Action::InsertChar(..) | Action::InsertNewline | Action::InsertTab
             | Action::DeleteBackward | Action::DeleteForward
-            | Action::DeleteCharBackward | Action::DeleteCharForward
             | Action::DeleteWordBackward | Action::DeleteWordForward
             | Action::DeleteLine | Action::DeleteToEndOfLine
-            | Action::Indent | Action::IndentLine | Action::Unindent | Action::UnindentLine
+            | Action::Indent | Action::Unindent
             | Action::DuplicateLine | Action::MoveLineUp | Action::MoveLineDown
             | Action::JoinLines | Action::ToggleComment
             | Action::Undo | Action::Redo => ActionCategory::Editing,
 
-            Action::SaveFile | Action::SaveAs | Action::SaveFileAs | Action::CloseFile | Action::CloseBuffer
+            Action::SaveFile | Action::SaveAs | Action::CloseFile
             | Action::OpenFile | Action::OpenFileAt(..) | Action::NewFile
             | Action::ReloadFile | Action::ReloadConfig => ActionCategory::File,
 
@@ -378,22 +335,19 @@ impl Action {
 
             Action::Find | Action::FindNext | Action::FindPrevious
             | Action::SearchForward | Action::SearchBackward
-            | Action::SearchNext | Action::SearchPrevious
             | Action::Replace | Action::ReplaceAll
-            | Action::SearchReplace | Action::SearchReplaceAll
             | Action::SearchToggleRegex | Action::SearchToggleCaseSensitive
-            | Action::SearchForwardRegex | Action::SearchBackwardRegex
-            | Action::GoToLine(..) | Action::JumpToLine
+            | Action::GoToLine(..)
             | Action::FuzzyFindFile | Action::FindSymbol | Action::FindHeading => ActionCategory::Search,
 
             Action::SwitchToInsertMode | Action::SwitchToNormalMode
             | Action::SwitchToVisualMode | Action::SwitchToVisualLineMode
             | Action::SwitchToCommandMode | Action::SwitchToSearchMode => ActionCategory::Mode,
 
-            Action::ShowPalette | Action::ShowCommandPalette | Action::ShowNotifications
+            Action::ShowPalette | Action::ShowNotifications
             | Action::ToggleFileTree | Action::ToggleMarkdownPreview
             | Action::ToggleLineNumbers | Action::ToggleRelativeLineNumbers
-            | Action::ToggleWordWrap | Action::ToggleWrap
+            | Action::ToggleWordWrap
             | Action::ToggleSyntaxHighlighting | Action::ToggleStatusBar
             | Action::ToggleSideBySide | Action::ToggleTabBar | Action::ToggleMinimap
             | Action::IncreaseScrolloff | Action::DecreaseScrolloff
@@ -405,13 +359,13 @@ impl Action {
             | Action::FocusEditor | Action::FocusPreview | Action::FocusFileTree
             | Action::FocusWorkspaceSearch
             | Action::SplitHorizontal | Action::SplitVertical
-            | Action::ClosePane | Action::CloseSplit | Action::NextSplit | Action::PreviousSplit
-            | Action::SwitchBuffer(..) | Action::GoToBuffer(..) | Action::MoveToLine(..)
+            | Action::ClosePane | Action::NextSplit | Action::PreviousSplit
+            | Action::SwitchBuffer(..) | Action::MoveToLine(..)
             | Action::NextBuffer | Action::PreviousBuffer => ActionCategory::Navigation,
 
             Action::ExecuteCommand(..) | Action::Suspend | Action::DebugInfo => ActionCategory::Application,
 
-            Action::RepeatLastAction | Action::PlaybackMacro
+            Action::RepeatLastAction
             | Action::MacroStart | Action::MacroEnd | Action::MacroPlay => ActionCategory::Custom,
 
             Action::SelectAll | Action::SelectLine | Action::SelectToMatchingBrace
@@ -432,7 +386,7 @@ impl Action {
             | Action::TerminalScrollDown
             | Action::TerminalCyclePosition => ActionCategory::Terminal,
 
-            Action::Noop | Action::NoOp | Action::Quit | Action::ForceQuit => ActionCategory::Application,
+            Action::Noop | Action::Quit | Action::ForceQuit => ActionCategory::Application,
         }
     }
 

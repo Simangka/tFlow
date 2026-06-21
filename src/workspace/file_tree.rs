@@ -96,6 +96,71 @@ impl FileTree {
         false
     }
 
+    /// Expand the currently selected directory entry.
+    /// Returns true if the entry was expanded, false otherwise.
+    pub fn expand(&mut self) -> bool {
+        let visible = self.visible_entries();
+        if visible.is_empty() || self.selected >= visible.len() {
+            return false;
+        }
+        let entry = visible[self.selected];
+        if !Self::is_expandable(entry) {
+            return false;
+        }
+        let entry_path = entry.path.clone();
+        let show_hidden = self.show_hidden;
+        let respect_gitignore = self.respect_gitignore;
+        if let Some(entry_mut) = self.find_entry_mut(&entry_path) {
+            if entry_mut.expanded {
+                return false;
+            }
+            entry_mut.expanded = true;
+            if entry_mut.children.is_empty() {
+                match Self::build_tree(&entry_mut.path, entry_mut.depth + 1, show_hidden, respect_gitignore) {
+                    Ok(children) => entry_mut.children = children,
+                    Err(_) => {
+                        entry_mut.expanded = false;
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Collapse the currently selected directory entry.
+    /// If already collapsed, navigate to the parent directory instead.
+    /// Returns true if a change was made, false otherwise.
+    pub fn collapse(&mut self) -> bool {
+        let visible = self.visible_entries();
+        if visible.is_empty() || self.selected >= visible.len() {
+            return false;
+        }
+        let entry = visible[self.selected];
+        if !Self::is_expandable(entry) {
+            return false;
+        }
+        let entry_path = entry.path.clone();
+        if let Some(entry_mut) = self.find_entry_mut(&entry_path) {
+            if entry_mut.expanded {
+                entry_mut.expanded = false;
+                return true;
+            } else {
+                // Navigate to parent directory
+                let parent_depth = entry_mut.depth.saturating_sub(1);
+                let visible = self.visible_entries();
+                for i in (0..self.selected).rev() {
+                    if i < visible.len() && visible[i].depth == parent_depth {
+                        self.selected = i;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub fn selected_path(&self) -> Option<PathBuf> {
         let visible = self.visible_entries();
         if visible.is_empty() || self.selected >= visible.len() {

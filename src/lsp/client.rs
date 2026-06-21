@@ -13,6 +13,7 @@ use tokio::time::Instant;
 struct PendingRequest {
     method: String,
     doc_id: Option<DocumentId>,
+    #[allow(dead_code)]
     sent_at: Instant,
 }
 
@@ -35,6 +36,7 @@ pub struct LanguageClient {
     pending_requests: HashMap<RequestId, PendingRequest>,
     workspace_root: Option<PathBuf>,
 
+    #[allow(dead_code)]
     request_id_gen: Arc<AtomicU64>,
     event_tx: mpsc::UnboundedSender<LspEvent>,
 }
@@ -91,7 +93,9 @@ impl LanguageClient {
                 version: Some("0.1.0".into()),
             }),
             locale: None,
+            #[allow(deprecated)]
             root_path: self.workspace_root.as_ref().map(|p| p.to_string_lossy().to_string()),
+            #[allow(deprecated)]
             root_uri: self.workspace_root.as_ref().map(path_to_uri),
             initialization_options: init_options,
             capabilities: ClientCapabilities {
@@ -429,7 +433,7 @@ impl LanguageClient {
         &mut self,
         id: RequestId,
         method: &str,
-        params: Option<serde_json::Value>,
+        _params: Option<serde_json::Value>,
     ) -> Result<(), String> {
         let writer = self.writer.as_mut().ok_or("No writer")?;
         match method {
@@ -507,7 +511,7 @@ impl LanguageClient {
         }
     }
 
-    pub async fn send_did_change(&mut self, doc_id: DocumentId, version: i32, changes: Vec<TextDocumentContentChangeEvent>) {
+    pub async fn send_did_change(&mut self, doc_id: DocumentId, _version: i32, changes: Vec<TextDocumentContentChangeEvent>) {
         let state = match self.get_document_mut(doc_id) {
             Some(s) => s,
             None => return,
@@ -590,7 +594,7 @@ impl LanguageClient {
         position: Position,
         trigger_kind: Option<CompletionTriggerKind>,
         trigger_character: Option<String>,
-        request_id: RequestId,
+        _request_id: RequestId,
     ) -> Result<(), String> {
         if self.state != ClientState::Initialized {
             return Ok(());

@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+
 use ratatui::{
     layout::Rect,
     Frame,
@@ -23,6 +25,14 @@ pub struct RenderEngine {
     pub viewport_height: usize,
     pub viewport_width: usize,
     pub word_wrap: bool,
+    // P2.1: Cache visual_to_logical result within a render frame (Cell for interior mutability)
+    pub visual_line_cache: Cell<Option<(usize, usize, usize, usize)>>,
+    // P2.3: Cache search matches by line across frames (RefCell for interior mutability)
+    pub cached_search_query: RefCell<String>,
+    pub cached_search_matches: RefCell<Vec<Vec<(usize, usize)>>>,
+    pub cached_search_matches_snapshot: RefCell<Vec<Position>>,
+    // P2.2: Dirty-flag throttling for event loop (Cell for interior mutability)
+    pub dirty: Cell<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +52,11 @@ impl RenderEngine {
             viewport_height: 0,
             viewport_width: 0,
             word_wrap: true,
+            visual_line_cache: Cell::new(None),
+            cached_search_query: RefCell::new(String::new()),
+            cached_search_matches: RefCell::new(Vec::new()),
+            cached_search_matches_snapshot: RefCell::new(Vec::new()),
+            dirty: Cell::new(true),
         }
     }
 
@@ -51,6 +66,11 @@ impl RenderEngine {
 
     pub fn clear_dirty(&mut self) {
         self.dirty_regions.clear();
+    }
+
+    /// Returns true if the engine requires rendering (dirty flag is set).
+    pub fn needs_render(&self) -> bool {
+        self.dirty.get()
     }
 
     /// Find a break point at a word boundary within `max_width` chars.
@@ -151,27 +171,40 @@ impl RenderEngine {
         }
         let mut count = 0;
         for i in 0..buffer.line_count() {
-            let line = buffer.get_line(i);
-            count += self.wrapped_line_count(&line, max_width);
+            let line = buffer.get_line_ref(i);
+            count += self.wrapped_line_count(line, max_width);
         }
         count
     }
 
     /// Given a visual line index, find which logical line and segment offset it corresponds to.
+    /// Uses an internal cache to avoid repeated linear scans within the same frame.
     pub fn visual_to_logical(&self, buffer: &Buffer, visual_line: usize, max_width: usize) -> (usize, usize) {
+        // Check cache: (visual_line, max_width) -> (logical_line, segment_offset)
+        if let Some((cv, cm, cl, cs)) = self.visual_line_cache.get() {
+            if cv == visual_line && cm == max_width {
+                return (cl, cs);
+            }
+        }
         if !self.word_wrap || max_width < 2 {
-            return (visual_line, 0);
+            let result = (visual_line, 0);
+            self.visual_line_cache.set(Some((visual_line, max_width, result.0, result.1)));
+            return result;
         }
         let mut accumulated = 0;
         for i in 0..buffer.line_count() {
-            let line = buffer.get_line(i);
-            let count = self.wrapped_line_count(&line, max_width);
+            let line = buffer.get_line_ref(i);
+            let count = self.wrapped_line_count(line, max_width);
             if visual_line < accumulated + count {
-                return (i, visual_line - accumulated);
+                let result = (i, visual_line - accumulated);
+                self.visual_line_cache.set(Some((visual_line, max_width, result.0, result.1)));
+                return result;
             }
             accumulated += count;
         }
-        (buffer.line_count().saturating_sub(1), 0)
+        let result = (buffer.line_count().saturating_sub(1), 0);
+        self.visual_line_cache.set(Some((visual_line, max_width, result.0, result.1)));
+        result
     }
 
     /// Slice syntax-highlighted spans to a substring range [char_start, char_end).
@@ -254,10 +287,12 @@ impl RenderEngine {
             return;
         }
 
+        // P2.1: Compute visual_to_logical values once and reuse
+        let logical_line_start = self.visual_to_logical(buffer, visible_start, max_width).0;
+        let logical_line_end = self.visual_to_logical(buffer, visible_end.saturating_sub(1), max_width).0 + 1;
+
         // Render line numbers gutter (logical line numbers)
         if line_numbers {
-            let logical_line_start = self.visual_to_logical(buffer, visible_start, max_width).0;
-            let logical_line_end = self.visual_to_logical(buffer, visible_end.saturating_sub(1), max_width).0 + 1;
             let ln_range = logical_line_start..logical_line_end;
             crate::rendering::line_numbers::LineNumbers::render(
                 frame,
@@ -279,7 +314,7 @@ impl RenderEngine {
                     area.height,
                 );
                 let visible_blame: Vec<Option<crate::git::BlameInfo>> = bd.iter()
-                    .skip(self.visual_to_logical(buffer, visible_start, max_width).0)
+                    .skip(logical_line_start)
                     .take(area.height as usize)
                     .cloned()
                     .collect();
@@ -287,19 +322,34 @@ impl RenderEngine {
             }
         }
 
+        // P2.3: Reuse cached matches_by_line across frames when query/matches haven't changed
         let query_len = search_state.query.len();
-        let mut matches_by_line: Vec<Vec<(usize, usize)>> = vec![Vec::new(); total_logical_lines];
-        if !search_state.query.is_empty() {
-            for m in &search_state.matches {
-                let end = m.column + query_len;
-                if m.line < total_logical_lines {
-                    matches_by_line[m.line].push((m.column, end));
+        let needs_rebuild;
+        {
+            let cached_query = self.cached_search_query.borrow();
+            let cached_snapshot = self.cached_search_matches_snapshot.borrow();
+            needs_rebuild = *cached_query != search_state.query || *cached_snapshot != search_state.matches;
+        }
+        if needs_rebuild {
+            let mut matches_by_line: Vec<Vec<(usize, usize)>> = vec![Vec::new(); total_logical_lines];
+            if !search_state.query.is_empty() {
+                for m in &search_state.matches {
+                    let end = m.column + query_len;
+                    if m.line < total_logical_lines {
+                        matches_by_line[m.line].push((m.column, end));
+                    }
                 }
             }
+            *self.cached_search_query.borrow_mut() = search_state.query.clone();
+            *self.cached_search_matches.borrow_mut() = matches_by_line.clone();
+            *self.cached_search_matches_snapshot.borrow_mut() = search_state.matches.clone();
         }
 
         let mut text_lines: Vec<TextLine<'static>> = Vec::with_capacity(area.height as usize);
         let mut current_visual = 0usize;
+
+        // Hold a borrow on cached matches to avoid repeated RefCell lookups
+        let matches_by_line_cache = self.cached_search_matches.borrow();
 
         for logical_line in 0..total_logical_lines {
             let line_text = buffer.get_line(logical_line);
@@ -355,10 +405,9 @@ impl RenderEngine {
                             }
                         }
                     }
-
                     if !sel_handled {
-                        let matches_on_line = if query_len > 0 && logical_line < matches_by_line.len() {
-                            matches_by_line[logical_line].clone()
+                        let matches_on_line = if query_len > 0 && logical_line < matches_by_line_cache.len() {
+                            matches_by_line_cache[logical_line].clone()
                         } else {
                             Vec::new()
                         };
@@ -388,65 +437,14 @@ impl RenderEngine {
                             let full_spans: Vec<(String, Style)> = SyntaxHighlighter::highlight_line(&line_text, ext, theme);
                             let sliced = Self::slice_spans(&full_spans, seg_offset, seg_offset + seg_len);
 
-                            if sliced.is_empty() {
-                                spans.push(Span::styled(" ", Style::default().fg(theme.fg)));
-                            } else if matches_on_line.is_empty() {
-                                for (t, s) in &sliced {
-                                    let merged_fg = s.fg.unwrap_or(theme.fg);
-                                    let merged_bg = s.bg.unwrap_or(theme.bg);
-                                    let merged = Style::default().fg(merged_fg).bg(merged_bg);
-                                    let final_style = if s.add_modifier != Modifier::empty() {
-                                        merged.add_modifier(s.add_modifier)
-                                    } else {
-                                        merged
-                                    };
-                                    spans.push(Span::styled(t.clone(), final_style));
-                                }
-                            } else {
-                                let mut char_spans: Vec<(String, Style)> = Vec::new();
-                                let mut abs_col = seg_offset;
-                                for (seg_text, seg_style) in &sliced {
-                                    let seg_fg = seg_style.fg.unwrap_or(theme.fg);
-                                    let seg_bg = seg_style.bg.unwrap_or(theme.bg);
-                                    for ch in seg_text.chars() {
-                                        let is_match = matches_on_line.iter().any(|&(s, e)| abs_col >= s && abs_col < e);
-                                        let is_current = if let Some(ci) = current_match_on_line {
-                                            ci < matches_on_line.len() && is_match && abs_col >= matches_on_line[ci].0 && abs_col < matches_on_line[ci].1
-                                        } else {
-                                            false
-                                        };
-                                        let chr_bg = if is_current {
-                                            theme.search_highlight
-                                        } else if is_match {
-                                            theme.match_highlight
-                                        } else {
-                                            seg_bg
-                                        };
-                                        let chr_fg = if is_match { match_fg } else { seg_fg };
-                                        let chr_style = if is_current {
-                                            Style::default().fg(chr_fg).bg(chr_bg).add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(chr_fg).bg(chr_bg)
-                                        };
-                                        if let Some(last) = char_spans.last_mut() {
-                                            if last.1 == chr_style {
-                                                last.0.push(ch);
-                                                abs_col += 1;
-                                                continue;
-                                            }
-                                        }
-                                        char_spans.push((ch.to_string(), chr_style));
-                                        abs_col += 1;
-                                    }
-                                }
-                                if char_spans.is_empty() {
-                                    spans.push(Span::styled(" ", Style::default().fg(theme.fg)));
-                                } else {
-                                    for (t, s) in &char_spans {
-                                        spans.push(Span::styled(t.clone(), *s));
-                                    }
-                                }
-                            }
+                            spans = Self::merge_syntax_with_search(
+                                &sliced,
+                                seg_offset,
+                                &matches_on_line,
+                                current_match_on_line,
+                                theme,
+                                match_fg,
+                            );
                         } else {
                             let seg_offset_char = seg_offset;
                             let local_matches: Vec<(usize, usize)> = matches_on_line.iter()
@@ -506,6 +504,9 @@ impl RenderEngine {
 
         let paragraph = Paragraph::new(text_lines).style(Style::default().bg(theme.bg));
         frame.render_widget(paragraph, text_area);
+
+        // P2.2: Mark engine as rendered (no longer dirty)
+        self.dirty.set(false);
     }
 
     pub fn render_cursor(
@@ -705,6 +706,150 @@ impl RenderEngine {
 
         if spans.is_empty() {
             spans.push(Span::styled(" ", default_style));
+        }
+        spans
+    }
+
+    /// P2.4: Replace the O(chars × matches) char-by-char loop with a segment-merge approach.
+    /// Merges syntax-highlighted spans with search match intervals in sorted order,
+    /// producing spans only at style-transition boundaries (not per-character).
+    fn merge_syntax_with_search(
+        sliced: &[(String, Style)],
+        seg_offset: usize,
+        matches_on_line: &[(usize, usize)],
+        current_match_on_line: Option<usize>,
+        theme: &Theme,
+        match_fg: Color,
+    ) -> Vec<Span<'static>> {
+        if sliced.is_empty() {
+            return vec![Span::styled(" ", Style::default().fg(theme.fg))];
+        }
+
+        // Compute the absolute end of this segment
+        let seg_end = seg_offset + sliced.iter().map(|(t, _)| t.chars().count()).sum::<usize>();
+
+        if matches_on_line.is_empty() {
+            // Fast path: no search matches, just return styled syntax spans
+            let mut spans = Vec::with_capacity(sliced.len());
+            for (t, s) in sliced {
+                let merged_fg = s.fg.unwrap_or(theme.fg);
+                let merged_bg = s.bg.unwrap_or(theme.bg);
+                let mut style = Style::default().fg(merged_fg).bg(merged_bg);
+                if s.add_modifier != Modifier::empty() {
+                    style = style.add_modifier(s.add_modifier);
+                }
+                spans.push(Span::styled(t.clone(), style));
+            }
+            return spans;
+        }
+
+        let match_hl = Style::default().bg(theme.match_highlight).fg(match_fg);
+        let current_hl = Style::default().bg(theme.search_highlight).fg(match_fg).add_modifier(Modifier::BOLD);
+
+        // Collect all boundaries: syntax segment boundaries + match start/end positions
+        let mut boundaries: Vec<usize> = Vec::new();
+        let mut pos = seg_offset;
+        for (text, _) in sliced {
+            boundaries.push(pos);
+            pos += text.chars().count();
+        }
+        boundaries.push(seg_end);
+
+        // Add match boundaries that fall within this segment
+        for &(ms, me) in matches_on_line {
+            if ms > seg_offset && ms < seg_end {
+                boundaries.push(ms);
+            }
+            if me > seg_offset && me < seg_end {
+                boundaries.push(me);
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        // Walk through each interval between boundaries
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let current_match_range = current_match_on_line
+            .filter(|&ci| ci < matches_on_line.len())
+            .map(|ci| matches_on_line[ci]);
+
+        for i in 0..boundaries.len() - 1 {
+            let start = boundaries[i];
+            let end = boundaries[i + 1];
+            if start >= end {
+                continue;
+            }
+
+            // Determine the syntax style at this position by scanning sliced spans
+            let synt_style = {
+                let mut c = seg_offset;
+                let mut style = Style::default().fg(theme.fg);
+                for (text, s) in sliced {
+                    let t_len = text.chars().count();
+                    if start >= c && start < c + t_len {
+                        style = *s;
+                        break;
+                    }
+                    c += t_len;
+                }
+                style
+            };
+
+            // Check if this range is within a match interval
+            let is_match = matches_on_line.iter().any(|&(ms, me)| start >= ms && end <= me);
+            let is_current = current_match_range
+                .map(|(cms, cme)| is_match && start >= cms && end <= cme)
+                .unwrap_or(false);
+
+            // Extract the text for this interval from the sliced spans
+            let text = {
+                let mut result = String::new();
+                let mut c = seg_offset;
+                for (seg_text, _) in sliced {
+                    let t_len = seg_text.chars().count();
+                    let seg_end2 = c + t_len;
+                    if seg_end2 <= start {
+                        c = seg_end2;
+                        continue;
+                    }
+                    if c >= end {
+                        break;
+                    }
+                    let local_start = start.saturating_sub(c);
+                    let local_end = (end - c).min(t_len);
+                    if local_start < t_len && local_end > local_start {
+                        let sb = seg_text.char_indices().nth(local_start).map(|(i, _)| i).unwrap_or(seg_text.len());
+                        let eb = seg_text.char_indices().nth(local_end).map(|(i, _)| i).unwrap_or(seg_text.len());
+                        result.push_str(&seg_text[sb..eb]);
+                    }
+                    c = seg_end2;
+                }
+                result
+            };
+
+            if text.is_empty() {
+                continue;
+            }
+
+            let style = if is_current {
+                current_hl
+            } else if is_match {
+                match_hl
+            } else {
+                let fg = synt_style.fg.unwrap_or(theme.fg);
+                let bg = synt_style.bg.unwrap_or(theme.bg);
+                let mut style = Style::default().fg(fg).bg(bg);
+                if synt_style.add_modifier != Modifier::empty() {
+                    style = style.add_modifier(synt_style.add_modifier);
+                }
+                style
+            };
+
+            spans.push(Span::styled(text, style));
+        }
+
+        if spans.is_empty() {
+            spans.push(Span::styled(" ", Style::default().fg(theme.fg)));
         }
         spans
     }

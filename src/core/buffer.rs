@@ -82,16 +82,25 @@ impl Buffer {
     }
 
     pub fn save(&mut self) -> Result<(), anyhow::Error> {
+        use std::io::Write;
         let path = self.path.as_ref().ok_or_else(|| anyhow::anyhow!("No path set"))?;
-        let text = self.rope.to_string();
-        let output = match self.line_endings {
-            LineEnding::Lf => text,
-            LineEnding::CrLf => text.replace('\n', "\r\n"),
-            LineEnding::Cr => text.replace('\n', "\r"),
-        };
-        std::fs::write(path, output.as_bytes())?;
+        let file = std::fs::File::create(path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let mut lines = self.rope.lines();
+        if let Some(first) = lines.next() {
+            write!(writer, "{}", first)?;
+        }
+        for line in lines {
+            match self.line_endings {
+                LineEnding::Lf => write!(writer, "\n{}", line)?,
+                LineEnding::CrLf => write!(writer, "\r\n{}", line)?,
+                LineEnding::Cr => write!(writer, "\r{}", line)?,
+            }
+        }
+        writer.flush()?;
         self.dirty = false;
-        self.modified_at = Some(std::time::SystemTime::now());
+        self.modified_at = path.metadata().ok().and_then(|m| m.modified().ok());
+        self.saved_cursor = self.cursor;
         Ok(())
     }
 
@@ -223,6 +232,14 @@ impl Buffer {
             return String::new();
         }
         self.rope.line(idx).to_string()
+    }
+
+    /// Returns a reference to the content of a logical line without allocating.
+    pub fn get_line_ref(&self, idx: usize) -> &str {
+        if idx >= self.rope.len_lines() {
+            return "";
+        }
+        self.rope.line(idx).as_str().unwrap_or("")
     }
 
     pub fn get_text(&self) -> String {

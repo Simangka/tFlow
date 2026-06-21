@@ -22,6 +22,7 @@ pub struct LspManager {
     servers: HashMap<LanguageId, ServerConnection>,
     server_for_document: HashMap<DocumentId, LanguageId>,
     config: LanguageServerConfig,
+    #[allow(dead_code)]
     lsp_config: LspConfig,
     cache: Arc<LspCache>,
     completion_handler: CompletionHandler,
@@ -86,22 +87,18 @@ impl LspManager {
     }
 
     async fn drain_reader_messages(&mut self) {
-        let mut messages: Vec<(LanguageId, RpcMessage)> = Vec::new();
-        for (lang, conn) in &mut self.servers {
+        for (_lang, conn) in &mut self.servers {
             loop {
                 match conn.reader_rx.try_recv() {
-                    Ok(msg) => messages.push((lang.clone(), msg)),
+                    Ok(msg) => {
+                        let _ = conn.client.handle_message(msg).await;
+                    }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                        tracing::warn!(language = %lang, "Reader channel disconnected");
+                        tracing::warn!(language = %_lang, "Reader channel disconnected");
                         break;
                     }
                 }
-            }
-        }
-        for (lang, msg) in messages {
-            if let Some(conn) = self.servers.get_mut(&lang) {
-                let _ = conn.client.handle_message(msg).await;
             }
         }
     }

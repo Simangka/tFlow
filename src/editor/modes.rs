@@ -51,17 +51,20 @@ impl EditorMode {
         self.command_buffer.clear();
     }
 
-    pub fn push_command_char(&mut self, c: char) -> bool {
+    pub fn push_command_char(&mut self, c: char) -> CommandCharResult {
         if c == '\n' || c == '\r' {
-            let complete = !self.command_buffer.is_empty();
-            return complete;
+            if self.command_buffer.is_empty() {
+                return CommandCharResult::Continue;
+            }
+            let cmd = self.command_buffer.clone();
+            return CommandCharResult::ReadyToExecute(cmd);
         }
         if c == '\u{7f}' || c == '\x08' {
             self.command_buffer.pop();
-            return false;
+            return CommandCharResult::Continue;
         }
         self.command_buffer.push(c);
-        false
+        CommandCharResult::Continue
     }
 
     pub fn clear_command(&mut self) {
@@ -79,4 +82,10 @@ impl EditorMode {
     pub fn is_visual(&self) -> bool {
         self.mode.is_visual()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandCharResult {
+    Continue,
+    ReadyToExecute(String),
 }
