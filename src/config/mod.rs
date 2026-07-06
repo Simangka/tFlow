@@ -108,6 +108,7 @@ pub struct Config {
     pub markdown: MarkdownConfig,
     pub terminal: TerminalConfig,
     pub clipboard_provider: String,
+    pub files: Vec<String>,
 }
 
 impl Default for Config {
@@ -121,6 +122,7 @@ impl Default for Config {
             markdown: MarkdownConfig::default(),
             terminal: TerminalConfig::default(),
             clipboard_provider: "system".to_string(),
+            files: Vec::new(),
         }
     }
 }
@@ -146,7 +148,7 @@ impl Config {
         workspace: Option<&std::path::Path>,
         _position: Option<&str>,
         _readonly: bool,
-        _files: &[String],
+        files: &[String],
     ) {
         if let Some(t) = theme {
             self.theme = t.to_string();
@@ -157,6 +159,7 @@ impl Config {
         if let Some(ws) = workspace {
             self.workspace.root_path = Some(ws.to_path_buf());
         }
+        self.files = files.to_vec();
     }
 }
 

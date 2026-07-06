@@ -52,7 +52,6 @@ impl EventLoop {
         }
         let _guard = RawModeGuard;
 
-        let files: Vec<String> = Vec::new();
         let mut ctx = AppContext::new(config);
 
         // Initialize LSP channels and spawn manager task
@@ -68,6 +67,7 @@ impl EventLoop {
         // Start file system watcher for real-time file tree updates
         ctx.watch_workspace();
 
+        let files = ctx.app.config.files.clone();
         for file in &files {
             let path = std::path::PathBuf::from(file);
             if path.exists() {
