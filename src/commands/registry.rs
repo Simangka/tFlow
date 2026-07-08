@@ -778,14 +778,27 @@ impl CommandRegistry {
             Action::Paste => {
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
                     if let Ok(text) = clipboard.get_text() {
+                        let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
+                        if ctx.editor.selection.is_active && !ctx.editor.selection.is_empty() {
+                            if let Some(range) = ctx.editor.selection.normalized_range() {
+                                let buf = ctx.editor.buffers.get_mut(ctx.editor.active_buffer).ok_or("No active buffer")?;
+                                buf.delete_range(range);
+                                ctx.editor.cursor.position = range.start;
+                            }
+                            ctx.editor.selection.clear();
+                        }
                         let buf = ctx.editor.buffers.get_mut(ctx.editor.active_buffer).ok_or("No active buffer")?;
-                        let pos = buf.cursor;
-                        buf.insert_str(pos, &text);
-                        buf.cursor = crate::core::Position::new(
-                            pos.line,
-                            pos.column + text.len(),
-                        );
-                        ctx.editor.cursor.position = buf.cursor;
+                        let pos = ctx.editor.cursor.position;
+                        buf.insert_str(pos, &cleaned);
+                        let newlines = cleaned.chars().filter(|&c| c == '\n').count();
+                        let new_pos = if newlines == 0 {
+                            crate::core::Position::new(pos.line, pos.column + cleaned.chars().count())
+                        } else {
+                            crate::core::Position::new(pos.line + newlines, cleaned.split('\n').last().unwrap_or("").chars().count())
+                        };
+                        buf.cursor = new_pos;
+                        ctx.editor.cursor.position = new_pos;
+                        ctx.editor.cursor.preferred_column = new_pos.column;
                         buf.set_modified();
                     }
                 }

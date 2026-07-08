@@ -176,7 +176,11 @@ impl EventLoop {
                         }
                     }
                 }
-                _ => {}
+                Some(InputEvent::Paste(data)) => {
+                    ctx.handle_paste_event(&data);
+                }
+                Some(InputEvent::FocusGained) | Some(InputEvent::FocusLost) => {}
+                None => {}
             }
 
             // Drain pending LSP events (non-blocking, batched)
@@ -264,7 +268,41 @@ impl EventLoop {
         }
     }
 
+    /// Disable Quick Edit Mode on Windows so Ctrl+V arrives as a key event instead
+    /// of being intercepted by the console and injected character-by-character.
+    /// Neovim and other proper terminal editors all do this.
+    #[cfg(windows)]
+    fn disable_quick_edit_mode() {
+        const STD_INPUT_HANDLE: u32 = 0xFFFFFFF6u32;
+        const ENABLE_QUICK_EDIT_MODE: u32 = 0x0040;
+        const ENABLE_EXTENDED_FLAGS: u32 = 0x0080;
+
+        type HANDLE = *mut std::ffi::c_void;
+        type BOOL = i32;
+
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> HANDLE;
+            fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *mut u32) -> BOOL;
+            fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: u32) -> BOOL;
+        }
+
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            if handle.is_null() || handle as isize == -1 {
+                return;
+            }
+            let mut mode: u32 = 0;
+            if GetConsoleMode(handle, &mut mode) != 0 {
+                mode |= ENABLE_EXTENDED_FLAGS;
+                mode &= !ENABLE_QUICK_EDIT_MODE;
+                SetConsoleMode(handle, mode);
+            }
+        }
+    }
+
     fn setup_terminal() -> Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, anyhow::Error> {
+        #[cfg(windows)]
+        Self::disable_quick_edit_mode();
         crossterm::terminal::enable_raw_mode()?;
         let mut stdout = std::io::stdout();
         crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
@@ -730,6 +768,16 @@ impl EventLoop {
                     }
                     KeyCode::BackTab => {
                         return ctx.handle_action(&Action::Unindent);
+                    }
+                    KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
+                        ctx.lsp.show_completion = false;
+                        ctx.lsp.completion_items.clear();
+                        return ctx.handle_action(&Action::Paste);
+                    }
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::NONE => {
+                        ctx.lsp.show_completion = false;
+                        ctx.lsp.completion_items.clear();
+                        return ctx.handle_action(&Action::Paste);
                     }
                     KeyCode::Char(c) => {
                         if c == '\n' || c == '\r' {

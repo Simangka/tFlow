@@ -159,6 +159,9 @@ impl KeyMap {
         add(&mut km, shift_char('J'), Action::JoinLines, normal);
         add(&mut km, char_key('p'), Action::Paste, normal);
         add(&mut km, shift_char('P'), Action::Paste, normal);
+        add(&mut km, char_key('p'), Action::Paste, insert);
+        add(&mut km, ctrl('v'), Action::Paste, insert);
+        add(&mut km, ctrl('v'), Action::Paste, normal);
         add(&mut km, key(KeyCode::Char('>'), KeyModifiers::NONE), Action::Indent, normal);
         add(&mut km, key(KeyCode::Char('>'), KeyModifiers::SHIFT), Action::Indent, normal);
         add(&mut km, key(KeyCode::Char('<'), KeyModifiers::NONE), Action::Unindent, normal);

@@ -939,6 +939,7 @@ impl AppContext {
                     };
                     self.editor.cursor.position = new_pos;
                     self.editor.cursor.preferred_column = new_pos.column;
+                    buf.cursor = new_pos;
                     buf.set_modified();
                     if let Some(history) = self.editor.histories.get_mut(self.editor.active_buffer) {
                         history.push(HistoryEntry {
@@ -1804,6 +1805,7 @@ impl AppContext {
 
         self.editor.cursor.position = new_pos;
         self.editor.cursor.preferred_column = new_pos.column;
+        buf.cursor = new_pos;
         buf.set_modified();
 
         if let Some(history) = self.editor.histories.get_mut(self.editor.active_buffer) {
